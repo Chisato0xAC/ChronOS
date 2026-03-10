@@ -11,6 +11,24 @@ DATA_DIR = Path(__file__).resolve().parent / "data"
 STATE_FILE = DATA_DIR / "state.json"
 
 
+# 如果 data/state.json 不存在，就创建一个默认文件。
+# 这样用户第一次运行项目时，不需要手动新建 data 文件夹。
+def ensure_state_file_exists():
+    # 第一步：确保 data/ 文件夹存在。
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+    # 第二步：如果 state.json 已存在，就什么都不做。
+    if STATE_FILE.exists():
+        return
+
+    # 第三步：写入一个最简单的默认状态。
+    default_state = {"dp": 0, "gp": 0}
+    STATE_FILE.write_text(
+        json.dumps(default_state, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
 # 这个处理器只负责一个接口：保存 DP 到 JSON 文件。
 class SaveDpHandler(BaseHTTPRequestHandler):
     # 这里处理浏览器的 GET 请求，用来返回页面和脚本文件。
@@ -96,6 +114,8 @@ class SaveDpHandler(BaseHTTPRequestHandler):
 
 # 启动本地服务，监听 8000 端口。
 if __name__ == "__main__":
+    # 启动前，先确保状态文件存在。
+    ensure_state_file_exists()
     server = HTTPServer(("0.0.0.0", 8000), SaveDpHandler)
     print("Server running at http://0.0.0.0:8000")
     server.serve_forever()
