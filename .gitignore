@@ -1,1 +1,7 @@
 data/
+logs/
+__pycache__/
+.ruff_cache/
+
+# 调试用启动脚本（不作为发布内容）
+ChronOS-dev.bat
