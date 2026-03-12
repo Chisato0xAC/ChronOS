@@ -5,7 +5,7 @@
     "description": "string",
     "type": "main | side | daily",
     
-    "status": "pending | ongoing | completed | cancelled",
+    "status": "pending | processing | completed | cancelled",
 
     "rewards": [
         {"type": "dp", "amount": 100 },

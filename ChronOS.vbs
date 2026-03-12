@@ -40,12 +40,16 @@ ps = ps & "$edge=FindEdge; if(-not $edge){Msg 'Microsoft Edge not found (msedge.
 
 ps = ps & "$logs=Join-Path $Root 'logs'; New-Item -ItemType Directory -Force -Path $logs|Out-Null" & vbCrLf
 ps = ps & "$out=Join-Path $logs 'server.out.log'; $err=Join-Path $logs 'server.err.log'" & vbCrLf
+ps = ps & "Remove-Item -Force -EA SilentlyContinue $out,$err" & vbCrLf
+
+ps = ps & "$env:PYTHONUTF8='1'" & vbCrLf
+ps = ps & "$env:PYTHONIOENCODING='utf-8'" & vbCrLf
 
 ps = ps & "$edgeProfile=Join-Path ([IO.Path]::GetTempPath()) 'ChronOS_edge_profile'; New-Item -ItemType Directory -Force -Path $edgeProfile|Out-Null" & vbCrLf
 ps = ps & "$server=$null; $app=$null" & vbCrLf
 
 ps = ps & "try{" & vbCrLf
-ps = ps & "  $server=Start-Process -FilePath $py -ArgumentList @('server.py') -WorkingDirectory $Root -WindowStyle Hidden -RedirectStandardOutput $out -RedirectStandardError $err -PassThru" & vbCrLf
+ps = ps & "  $server=Start-Process -FilePath $py -ArgumentList @('-X','utf8','-u','server.py') -WorkingDirectory $Root -WindowStyle Hidden -RedirectStandardOutput $out -RedirectStandardError $err -PassThru" & vbCrLf
 ps = ps & "  $ready=$false; for($i=0;$i -lt 50;$i++){Start-Sleep -Milliseconds 200; if(TestPort '127.0.0.1' $port){$ready=$true;break}; if($server.HasExited){break}}" & vbCrLf
 ps = ps & "  if(-not $ready){Msg ('Server start failed. Logs: ' + $out + ' ' + $err) 'ChronOS - Start Failed'; exit 1}" & vbCrLf
 ps = ps & "  $w=500; $h=360;" & vbCrLf
