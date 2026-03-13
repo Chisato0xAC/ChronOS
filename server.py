@@ -1,9 +1,10 @@
 import json
+import queue
 import subprocess
 import sys
 import threading
 import time
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -14,6 +15,20 @@ SRC_DIR = Path(__file__).resolve().parent / "src"
 DATA_DIR = Path(__file__).resolve().parent / "data"
 # 这个路径指向项目里的状态文件，用来保存 DP 和 GP。
 STATE_FILE = DATA_DIR / "state.json"
+
+# 这个路径指向状态历史记录文件（JSON Lines：一行一条 JSON）。
+# 注意：这里只记录 data/state.json 的变化，不记录爬虫状态。
+STATE_HISTORY_FILE = DATA_DIR / "state_history.jsonl"
+
+# 这个列表保存所有 SSE 连接（前端会连过来等待“状态已变化”的通知）。
+SSE_CLIENT_QUEUES = []
+SSE_CLIENT_QUEUES_LOCK = threading.Lock()
+
+# 写 state.json / state_history.jsonl / crawler_state.json 时用同一把锁，避免并发写坏文件。
+STATE_IO_LOCK = threading.Lock()
+
+# 这些异常通常表示“客户端断开了连接”，属于正常情况。
+DISCONNECT_ERRORS = (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)
 
 # 爬虫运行状态文件（爬虫脚本读写）。
 CRAWLER_STATE_FILE = DATA_DIR / "crawler_state.json"
@@ -73,6 +88,340 @@ def ensure_state_file_exists():
     )
 
 
+def ensure_state_history_file_exists() -> None:
+    # 如果 data/state_history.jsonl 不存在，就创建一个空文件。
+    # 这个文件采用 JSONL：每一行都是一条 JSON 记录。
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    if STATE_HISTORY_FILE.exists():
+        return
+    STATE_HISTORY_FILE.write_text("", encoding="utf-8")
+
+
+def append_state_history(event_type: str, changes: list, note: str = "") -> None:
+    # 追加一条 state 变更历史。
+    # - 只负责写一行 JSON，不修改旧记录（可追溯）
+    # - changes 的格式：[{"path": "dp", "from": 1, "to": 2}]
+    # - data 用于补充上下文（例如 undo_of_ts）
+
+    return append_state_history_with_data(
+        event_type=event_type, changes=changes, note=note, data={}
+    )
+
+
+def append_state_history_with_data(
+    event_type: str, changes: list, note: str, data: dict, actor: str = "server"
+) -> None:
+    # 和 append_state_history 一样，但允许写入 data / actor。
+    ensure_state_history_file_exists()
+
+    ts = int(time.time())
+    text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    record = {
+        "v": 1,
+        "ts": ts,
+        "text": text,
+        "type": event_type,
+        "actor": actor,
+        "note": note,
+        "data": data,
+        "changes": changes,
+    }
+
+    # JSONL：每条记录一行，方便追加写入。
+    with STATE_HISTORY_FILE.open("a", encoding="utf-8", newline="\n") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def write_json_atomic(file_path: Path, obj: dict) -> None:
+    # 原子写入：先写临时文件，再替换原文件，避免写到一半程序中断导致文件损坏。
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = file_path.with_suffix(file_path.suffix + ".tmp")
+    tmp_path.write_text(
+        json.dumps(obj, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    tmp_path.replace(file_path)
+
+
+def read_state_file() -> dict:
+    # 读取 data/state.json。
+    # 这个函数尽量保证：即使文件不存在/字段缺失，也能返回一个可用的 dict。
+    if STATE_FILE.exists():
+        try:
+            state = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+            if isinstance(state, dict):
+                return state
+        except Exception:
+            pass
+    return {"dp": 0, "gp": 0}
+
+
+def read_crawler_state_file() -> dict:
+    # 读取 data/crawler_state.json。
+    ensure_crawler_state_file_exists()
+    try:
+        data = json.loads(CRAWLER_STATE_FILE.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            return data
+        return {}
+    except Exception:
+        return {}
+
+
+def write_crawler_state_file(crawler_state: dict) -> None:
+    # 写回 data/crawler_state.json。
+    if not isinstance(crawler_state, dict):
+        crawler_state = {}
+    write_json_atomic(CRAWLER_STATE_FILE, crawler_state)
+
+
+def history_has_pending_dp_id(pending_dp_id: str) -> bool:
+    # 防止重复应用同一个 pending_dp_id。
+    # 简单做法：从历史文件末尾往前扫，找到匹配就返回 True。
+    if not pending_dp_id:
+        return False
+    if not STATE_HISTORY_FILE.exists():
+        return False
+
+    try:
+        lines = STATE_HISTORY_FILE.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return False
+
+    for i in range(len(lines) - 1, -1, -1):
+        line = lines[i].strip()
+        if not line:
+            continue
+
+        try:
+            record = json.loads(line)
+        except Exception:
+            continue
+
+        if not isinstance(record, dict):
+            continue
+
+        data = record.get("data")
+        if not isinstance(data, dict):
+            continue
+
+        if str(data.get("pending_dp_id", "")) == pending_dp_id:
+            return True
+
+    return False
+
+
+def try_apply_pending_crawler_changes() -> None:
+    # 接入爬虫修改：把 crawler_state.json 里的 pending_dp_* 正式应用到 state.json。
+    # 未来扩展方向：把 pending_dp_* 改成 pending_events 数组，再在这里统一处理。
+
+    crawler_state = read_crawler_state_file()
+    pending_status = str(crawler_state.get("pending_dp_status", "")).strip()
+    if pending_status != "pending":
+        return
+
+    pending_dp_id = str(crawler_state.get("pending_dp_id", "")).strip()
+    if not pending_dp_id:
+        return
+
+    dp_delta = int(crawler_state.get("pending_dp_delta", 0) or 0)
+
+    with STATE_IO_LOCK:
+        # 双保险：如果历史里已经有这个 pending_dp_id，就不要重复应用。
+        if history_has_pending_dp_id(pending_dp_id):
+            crawler_state["pending_dp_status"] = "applied"
+            crawler_state["pending_dp_applied_note"] = "already_in_history"
+            crawler_state["pending_dp_applied_ts"] = int(time.time())
+            crawler_state["pending_dp_applied_text"] = datetime.now().strftime(
+                "%Y-%m-%d %H:%M:%S"
+            )
+            write_crawler_state_file(crawler_state)
+            return
+
+        state = read_state_file()
+        old_dp = int(state.get("dp", 0) or 0)
+
+        new_dp = old_dp + dp_delta
+        if new_dp < 0:
+            new_dp = 0
+
+        # 先把 crawler_state 标记为已应用（即使 new_dp 没变化，也算处理过）。
+        crawler_state["pending_dp_status"] = "applied"
+        crawler_state["pending_dp_applied_ts"] = int(time.time())
+        crawler_state["pending_dp_applied_text"] = datetime.now().strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
+        crawler_state["pending_dp_applied_old_dp"] = int(old_dp)
+        crawler_state["pending_dp_applied_new_dp"] = int(new_dp)
+
+        if new_dp != old_dp:
+            state["dp"] = int(new_dp)
+            if "gp" not in state:
+                state["gp"] = 0
+
+            write_json_atomic(STATE_FILE, state)
+
+            append_state_history_with_data(
+                event_type="crawler_dp_apply",
+                actor="crawler",
+                note="接入爬虫扣除",
+                data={
+                    "pending_dp_id": pending_dp_id,
+                    "pending_dp_reason": str(
+                        crawler_state.get("pending_dp_reason", "")
+                    ),
+                    "pending_dp_trigger_ts": int(
+                        crawler_state.get("pending_dp_trigger_ts", 0) or 0
+                    ),
+                    "pending_dp_window_start_ts": int(
+                        crawler_state.get("pending_dp_window_start_ts", 0) or 0
+                    ),
+                    "pending_dp_window_end_ts": int(
+                        crawler_state.get("pending_dp_window_end_ts", 0) or 0
+                    ),
+                    "pending_dp_delta": int(dp_delta),
+                },
+                changes=[{"path": "dp", "from": old_dp, "to": int(new_dp)}],
+            )
+
+        write_crawler_state_file(crawler_state)
+
+    # 通知前端刷新（不需要等 watcher）。
+    sse_broadcast("state", {"reason": "crawler_applied"})
+
+
+def apply_crawler_pending_changes_once() -> None:
+    # 包一层 try/except，避免爬虫对接的异常影响主服务。
+    try:
+        try_apply_pending_crawler_changes()
+    except Exception as e:
+        log_error(f"接入爬虫修改失败: {e}")
+
+
+def get_value_by_path(obj: dict, path: str):
+    # 通过点号路径读取值，例如："inventory.potion_small"。
+    cur = obj
+    parts = str(path).split(".")
+    for i in range(len(parts)):
+        key = parts[i]
+        if not isinstance(cur, dict):
+            return None
+        if key not in cur:
+            return None
+        cur = cur[key]
+    return cur
+
+
+def set_value_by_path(obj: dict, path: str, value) -> None:
+    # 通过点号路径写入值。
+    # - 如果中间层级不存在，会自动创建 dict。
+    parts = str(path).split(".")
+    cur = obj
+    for i in range(len(parts) - 1):
+        key = parts[i]
+        if key not in cur or not isinstance(cur[key], dict):
+            cur[key] = {}
+        cur = cur[key]
+    cur[parts[-1]] = value
+
+
+def find_latest_undoable_history_record():
+    # 找到最近一条“可以撤销”的历史记录。
+    # 简单规则：
+    # - type == undo 的记录本身不可撤销
+    # - 如果某条记录已经被 undo_of_ts 指向过，就跳过（避免重复撤销同一条）
+    if not STATE_HISTORY_FILE.exists():
+        return None
+
+    try:
+        lines = STATE_HISTORY_FILE.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return None
+
+    undone_ts = set()
+
+    for i in range(len(lines) - 1, -1, -1):
+        line = lines[i].strip()
+        if line == "":
+            continue
+
+        try:
+            record = json.loads(line)
+        except Exception:
+            continue
+
+        if not isinstance(record, dict):
+            continue
+
+        record_type = record.get("type")
+
+        if record_type == "undo":
+            data = record.get("data")
+            if isinstance(data, dict):
+                undo_of_ts = data.get("undo_of_ts")
+                if isinstance(undo_of_ts, int):
+                    undone_ts.add(undo_of_ts)
+            continue
+
+        ts = record.get("ts")
+        if isinstance(ts, int) and ts in undone_ts:
+            continue
+
+        changes = record.get("changes")
+        if isinstance(changes, list) and len(changes) > 0:
+            return record
+
+    return None
+
+
+def sse_broadcast(event_name: str, data: dict) -> None:
+    # 把一条事件广播给所有在线的 SSE 客户端。
+    # SSE 协议格式：
+    # event: <name>\n
+    # data: <json>\n
+    # \n
+    message = (
+        "event: "
+        + str(event_name)
+        + "\n"
+        + "data: "
+        + json.dumps(data, ensure_ascii=False)
+        + "\n\n"
+    )
+
+    with SSE_CLIENT_QUEUES_LOCK:
+        queues = list(SSE_CLIENT_QUEUES)
+
+    for q in queues:
+        try:
+            q.put_nowait(message)
+        except Exception:
+            # 队列满/异常就跳过，避免影响主流程。
+            pass
+
+
+def state_file_watcher_loop() -> None:
+    # 监控 data/state.json 的“文件修改时间”。
+    # 一旦外部（爬虫/手动修改/其他程序）改了 state.json，就广播一条事件给前端。
+    last_mtime = None
+
+    while True:
+        try:
+            if STATE_FILE.exists():
+                mtime = STATE_FILE.stat().st_mtime
+                if last_mtime is None:
+                    last_mtime = mtime
+                elif mtime != last_mtime:
+                    last_mtime = mtime
+                    sse_broadcast("state", {"reason": "file_changed"})
+        except Exception as e:
+            log_error(f"监控 state.json 失败: {e}")
+
+        # 这里用很短的 sleep，只在服务端做轮询。
+        time.sleep(0.5)
+
+
 def ensure_crawler_state_file_exists() -> None:
     # 确保 data/crawler_state.json 存在。
     # 这个文件只给爬虫脚本写入/读取；主服务端不主动修改其内容。
@@ -129,6 +478,10 @@ def run_crawler_once() -> None:
             if proc.stderr:
                 log_error(proc.stderr.strip())
             log_error(f"爬虫脚本退出码: {proc.returncode}")
+            return
+
+        # 爬虫脚本成功退出后，尝试把 pending_dp_* 正式应用到 state.json。
+        apply_crawler_pending_changes_once()
     except Exception as e:
         log_error(f"启动爬虫脚本失败: {e}")
 
@@ -171,6 +524,58 @@ def crawler_scheduler_loop() -> None:
 class SaveDpHandler(BaseHTTPRequestHandler):
     # 这里处理浏览器的 GET 请求，用来返回页面和脚本文件。
     def do_GET(self):
+        # SSE：前端连接这个接口，等待“state 变化”的通知。
+        if self.path == "/api/state-events":
+            q = None
+            try:
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("Connection", "keep-alive")
+                self.end_headers()
+
+                # 每个连接一个队列，用于接收广播消息。
+                q = queue.Queue(maxsize=50)
+                with SSE_CLIENT_QUEUES_LOCK:
+                    SSE_CLIENT_QUEUES.append(q)
+
+                def safe_write(raw_text: str) -> bool:
+                    # 安全写入：如果客户端断开连接，就返回 False。
+                    try:
+                        self.wfile.write(raw_text.encode("utf-8"))
+                        self.wfile.flush()
+                        return True
+                    except DISCONNECT_ERRORS:
+                        return False
+
+                # 先发一条注释行，避免某些代理缓冲。
+                if not safe_write(": connected\n\n"):
+                    return
+
+                while True:
+                    try:
+                        msg = q.get(timeout=15)
+                        if not safe_write(msg):
+                            break
+                    except queue.Empty:
+                        # 心跳：保持连接不断。
+                        if not safe_write(": keepalive\n\n"):
+                            break
+            except DISCONNECT_ERRORS:
+                # 手机锁屏/切后台时，经常会强制断开连接：这是正常情况。
+                pass
+            except Exception as e:
+                # 其他异常才需要打印，便于排查。
+                log_error(f"SSE 连接处理失败: {e}")
+            finally:
+                try:
+                    with SSE_CLIENT_QUEUES_LOCK:
+                        if q is not None and q in SSE_CLIENT_QUEUES:
+                            SSE_CLIENT_QUEUES.remove(q)
+                except Exception:
+                    pass
+            return
+
         # 访问根路径时，返回首页。
         if self.path == "/":
             file_path = SRC_DIR / "index.html"
@@ -206,11 +611,84 @@ class SaveDpHandler(BaseHTTPRequestHandler):
 
     # 这里处理前端发来的 POST 请求。
     def do_POST(self):
-        # 如果不是目标接口，就返回 404。
-        if self.path != "/api/save-dp":
+        # /api/save-dp：保存 DP
+        # /api/undo：撤销最近一次修改（可追溯）
+        if self.path != "/api/save-dp" and self.path != "/api/undo":
             self.send_response(404)
             self.end_headers()
             return
+
+        # 撤销接口：不要求请求体。
+        if self.path == "/api/undo":
+            try:
+                target = find_latest_undoable_history_record()
+                if target is None:
+                    response_body = json.dumps(
+                        {"ok": False, "reason": "no_undoable_history"}
+                    ).encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json; charset=utf-8")
+                    self.send_header("Content-Length", str(len(response_body)))
+                    self.end_headers()
+                    self.wfile.write(response_body)
+                    return
+
+                # 撤销包含：读取 state -> 反向应用 changes -> 写回 state -> 写 history。
+                # 这几个动作必须在同一把锁里完成，避免并发写入把文件写乱。
+                with STATE_IO_LOCK:
+                    state = read_state_file()
+
+                    undo_changes = []
+                    changes = target.get("changes")
+                    if not isinstance(changes, list):
+                        changes = []
+
+                    for i in range(len(changes)):
+                        ch = changes[i]
+                        if not isinstance(ch, dict):
+                            continue
+                        path = ch.get("path")
+                        if not isinstance(path, str) or path.strip() == "":
+                            continue
+
+                        # 反向应用：把值写回 from。
+                        to_value = ch.get("from")
+                        from_value = get_value_by_path(state, path)
+                        set_value_by_path(state, path, to_value)
+                        undo_changes.append(
+                            {"path": path, "from": from_value, "to": to_value}
+                        )
+
+                    # 把撤销后的状态写回 state.json（只写一次）。
+                    write_json_atomic(STATE_FILE, state)
+
+                    # 追加一条 undo 历史记录（可追溯）。
+                    undo_of_ts = target.get("ts")
+                    if not isinstance(undo_of_ts, int):
+                        undo_of_ts = 0
+                    append_state_history_with_data(
+                        event_type="undo",
+                        note="撤销",
+                        data={"undo_of_ts": undo_of_ts},
+                        changes=undo_changes,
+                    )
+
+                # 通知前端：state 变了，请重新读取。
+                sse_broadcast("state", {"reason": "undo"})
+
+                response_body = json.dumps(
+                    {"ok": True, "undo_of_ts": undo_of_ts}
+                ).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(response_body)))
+                self.end_headers()
+                self.wfile.write(response_body)
+                return
+            except Exception:
+                self.send_response(400)
+                self.end_headers()
+                return
 
         # 读取请求体内容。
         content_length = int(self.headers.get("Content-Length", "0"))
@@ -226,20 +704,29 @@ class SaveDpHandler(BaseHTTPRequestHandler):
 
             # 读取旧状态，然后只更新 dp/gp。
             # 这样 state.json 里其他字段（例如爬虫状态）不会被覆盖掉。
-            if STATE_FILE.exists():
-                state = json.loads(STATE_FILE.read_text(encoding="utf-8"))
-            else:
-                state = {"dp": 0, "gp": 0}
+            with STATE_IO_LOCK:
+                state = read_state_file()
 
-            state["dp"] = dp_value
-            if "gp" not in state:
-                state["gp"] = 0
+                old_dp = int(state.get("dp", 0))
 
-            # 把最新状态写回 state.json。
-            STATE_FILE.write_text(
-                json.dumps(state, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
+                # 只有当 dp 真的变化时，才写入 state.json，并记录一条 history。
+                if dp_value != old_dp:
+                    state["dp"] = dp_value
+                    if "gp" not in state:
+                        state["gp"] = 0
+
+                    # 把最新状态写回 state.json。
+                    write_json_atomic(STATE_FILE, state)
+
+                    # 追加一条历史记录（只记录变化）。
+                    append_state_history(
+                        event_type="dp_set",
+                        note="保存 DP",
+                        changes=[{"path": "dp", "from": old_dp, "to": dp_value}],
+                    )
+
+                    # 通知前端：state 变了，请重新读取 data/state.json。
+                    sse_broadcast("state", {"reason": "dp_saved"})
 
             # 返回保存成功结果。
             response_body = json.dumps({"ok": True}).encode("utf-8")
@@ -262,11 +749,20 @@ if __name__ == "__main__":
     # 启动前，先确保状态文件存在。
     ensure_state_file_exists()
     ensure_crawler_state_file_exists()
+    ensure_state_history_file_exists()
+
+    # 启动时也尝试接一次爬虫 pending（用于“程序没运行时错过 4:00”的补偿）。
+    apply_crawler_pending_changes_once()
 
     # 启动后台调度：主程序负责到点启动工具脚本
     t = threading.Thread(target=crawler_scheduler_loop, daemon=True)
     t.start()
 
-    server = HTTPServer(("0.0.0.0", 8000), SaveDpHandler)
+    # 启动后台监控：用于发现“外部改动 state.json”的情况。
+    watcher = threading.Thread(target=state_file_watcher_loop, daemon=True)
+    watcher.start()
+
+    # 使用 ThreadingHTTPServer：因为 SSE 连接会长期占用一个请求。
+    server = ThreadingHTTPServer(("0.0.0.0", 8000), SaveDpHandler)
     log("Server running at http://0.0.0.0:8000")
     server.serve_forever()

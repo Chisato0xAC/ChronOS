@@ -16,6 +16,9 @@ const dpInputElement = document.getElementById("dpInput");
 // 这行代码拿到设置 DP 按钮。
 const setDpButtonElement = document.getElementById("setDpButton");
 
+// 这行代码拿到撤销按钮。
+const undoButtonElement = document.getElementById("undoButton");
+
 // 这个函数负责把内存中的数值显示到页面上。
 function render() {
   // 这行把 DP 显示为整数文本。
@@ -44,7 +47,10 @@ function applyDp(nextDp) {
 // 这个函数负责从项目里的 JSON 文件读取 DP 和 GP。
 async function loadStateFromFile() {
   // 这行请求 data/state.json 文件。
-  const response = await fetch("./data/state.json");
+  const response = await fetch("./data/state.json", {
+    // 这行告诉浏览器不要缓存，确保拿到最新文件内容。
+    cache: "no-store",
+  });
   // 这行把 JSON 文本解析成 JavaScript 对象。
   const state = await response.json();
 
@@ -69,6 +75,23 @@ async function loadStateFromFile() {
   render();
 }
 
+// 这个函数连接后端的 SSE 接口：只要 state.json 有变化，后端会通知我们。
+function startStateEventStream() {
+  // EventSource 会一直保持连接，不需要计时器。
+  const source = new EventSource("/api/state-events");
+
+  // 收到名为 state 的事件时，重新读取 data/state.json。
+  source.addEventListener("state", function () {
+    loadStateFromFile();
+  });
+
+  // 连接出错时，浏览器会自动重连。
+  // 这里留一个提示，方便排查。
+  source.onerror = function () {
+    console.log("SSE 连接异常，浏览器将自动重连");
+  };
+}
+
 // 这个函数把当前 DP 发给后端接口，后端会写入 state.json。
 async function saveDpToFile() {
   try {
@@ -87,8 +110,25 @@ async function saveDpToFile() {
   }
 }
 
+// 这个函数请求后端执行撤销。
+async function undoLastChange() {
+  try {
+    const response = await fetch("/api/undo", {
+      method: "POST",
+    });
+
+    const result = await response.json();
+    if (!result.ok) {
+      console.log("没有可撤销的记录", result);
+    }
+  } catch (error) {
+    console.error("撤销失败", error);
+  }
+}
+
 // 这行执行读取 JSON 并更新页面的流程。
 loadStateFromFile();
+startStateEventStream();
 
 // 这个函数把 DP 增加 1，并刷新页面。
 function addDp() {
@@ -143,3 +183,6 @@ addDpButtonElement.addEventListener("click", addDp);
 minusDpButtonElement.addEventListener("click", minusDp);
 // 点击设置 DP 按钮时，执行输入框设置逻辑。
 setDpButtonElement.addEventListener("click", setDpFromInput);
+
+// 点击撤销按钮时，请求后端撤销。
+undoButtonElement.addEventListener("click", undoLastChange);
