@@ -1,0 +1,32 @@
+#!/bin/sh
+
+# 这是 git 的 reference-transaction hook：用于捕捉 tag 的创建。
+# 目标：当用户创建 tag（refs/tags/*）时，通知 ChronOS 触发 git_tag 事件。
+# 注意：hook 绝不能影响 git 操作；任何失败都要静默忽略。
+
+action="$1"
+if [ "$action" != "committed" ]; then
+  exit 0
+fi
+
+root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+
+# stdin 格式（每行）：<old> <new> <refname>
+while read old new ref; do
+  case "$ref" in
+    refs/tags/*)
+      tag=${ref#refs/tags/}
+
+      # 忽略删除 tag 的情况（new 全是 0）。
+      case "$new" in
+        *[!0]*) ;;
+        *) continue ;;
+      esac
+
+      python -X utf8 -u "$root/tools/send_event.py" git_tag "tag:$tag@$new" "tag=$tag" "hash=$new" >/dev/null 2>&1 || \
+      py -X utf8 -u "$root/tools/send_event.py" git_tag "tag:$tag@$new" "tag=$tag" "hash=$new" >/dev/null 2>&1 || true
+      ;;
+  esac
+done
+
+exit 0

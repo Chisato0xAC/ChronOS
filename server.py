@@ -1,5 +1,6 @@
 import json
 import queue
+import re
 import subprocess
 import sys
 import threading
@@ -36,6 +37,12 @@ CRAWLER_STATE_FILE = DATA_DIR / "crawler_state.json"
 # 爬虫脚本路径（工具脚本，由主程序按时间触发）
 CRAWLER_SCRIPT = Path(__file__).resolve().parent / "src" / "crawler" / "bilibili.py"
 CRAWLER_AUTH_FILE = DATA_DIR / "bilibili_auth.json"
+
+# 自定义扩展规则目录（用户可以在这里放 JSON 规则文件）
+EXT_RULES_DIR = Path(__file__).resolve().parent / "extensions" / "rules"
+
+# git hooks 模板目录（项目自带）。
+GITHOOKS_TEMPLATES_DIR = Path(__file__).resolve().parent / "tools" / "githooks"
 
 # 一天的分界线（北京时间）：4:00
 DAY_BOUNDARY_HOUR = 4
@@ -133,6 +140,116 @@ def append_state_history_with_data(
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
+def load_extension_rules() -> list:
+    # 读取 extensions/rules/*.json 里的规则。
+    # 0.0.5 第二步：只负责读取并返回，不做任何 DP 修改。
+    rules = []
+
+    try:
+        if not EXT_RULES_DIR.exists() or not EXT_RULES_DIR.is_dir():
+            return []
+
+        for file_path in sorted(EXT_RULES_DIR.glob("*.json")):
+            try:
+                raw = file_path.read_text(encoding="utf-8")
+                data = json.loads(raw)
+                if isinstance(data, dict):
+                    data["_file"] = str(file_path)
+                    rules.append(data)
+            except Exception:
+                # 单个规则文件坏了就跳过，不影响主服务。
+                continue
+    except Exception:
+        return []
+
+    return rules
+
+
+def match_rules_for_event(rules: list, event_name: str, event_data: dict) -> list:
+    # 找出命中的规则。
+    # 0.0.5 第二步：只做匹配，不做 DP 修改。
+    matched = []
+    if not isinstance(rules, list):
+        return []
+    if not isinstance(event_data, dict):
+        event_data = {}
+
+    for rule in rules:
+        if not isinstance(rule, dict):
+            continue
+
+        rule_event = rule.get("event", "")
+        if str(rule_event) != str(event_name):
+            continue
+
+        # tag_regex：只有当事件 data 里提供 tag 时才匹配。
+        tag_regex = rule.get("tag_regex", "")
+        if isinstance(tag_regex, str) and tag_regex.strip() != "":
+            tag_value = str(event_data.get("tag", ""))
+            if tag_value.strip() == "":
+                continue
+            try:
+                if re.match(tag_regex, tag_value) is None:
+                    continue
+            except Exception:
+                # 正则写错就当不匹配。
+                continue
+
+        matched.append(rule)
+
+    return matched
+
+
+def ensure_git_hooks_installed() -> None:
+    # 自动安装 git hooks（只做一次复制，失败也不影响主服务）。
+    # 目的：让“git commit / git tag”能全自动触发 ChronOS 的规则系统。
+    # 注意：.git/hooks 目录不会被 git 提交，所以需要在本机安装。
+
+    try:
+        repo_root = Path(__file__).resolve().parent
+        git_dir = repo_root / ".git"
+        if not git_dir.exists() or not git_dir.is_dir():
+            return
+
+        hooks_dir = git_dir / "hooks"
+        hooks_dir.mkdir(parents=True, exist_ok=True)
+
+        # 我们只安装这两个 hook：
+        # - post-commit：提交后触发
+        # - reference-transaction：创建 tag 时触发（如果 git 版本支持）
+        hook_names = ["post-commit", "reference-transaction"]
+        installed_any = False
+
+        for name in hook_names:
+            src = GITHOOKS_TEMPLATES_DIR / name
+            dst = hooks_dir / name
+
+            if not src.exists() or not src.is_file():
+                continue
+
+            try:
+                src_bytes = src.read_bytes()
+                if dst.exists() and dst.is_file():
+                    try:
+                        if dst.read_bytes() == src_bytes:
+                            continue
+                    except Exception:
+                        # 读失败就覆盖写。
+                        pass
+
+                dst.write_bytes(src_bytes)
+                installed_any = True
+            except Exception:
+                # 单个 hook 写失败就跳过。
+                continue
+
+        if installed_any:
+            log("已自动安装 git hooks（.git/hooks）")
+    except Exception:
+        # 安装失败不应影响主服务启动。
+        return
+
+
 def write_json_atomic(file_path: Path, obj: dict) -> None:
     # 原子写入：先写临时文件，再替换原文件，避免写到一半程序中断导致文件损坏。
     file_path.parent.mkdir(parents=True, exist_ok=True)
@@ -207,6 +324,46 @@ def history_has_pending_dp_id(pending_dp_id: str) -> bool:
             continue
 
         if str(data.get("pending_dp_id", "")) == pending_dp_id:
+            return True
+
+    return False
+
+
+def history_has_rule_event_id(event_id: str) -> bool:
+    # 用于扩展规则的“去重”：同一个 event_id 只允许处理一次。
+    # 0.0.5 第三步前置：先把检查逻辑准备好（本步仍不修改 DP）。
+    if not event_id:
+        return False
+    if not STATE_HISTORY_FILE.exists():
+        return False
+
+    try:
+        lines = STATE_HISTORY_FILE.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return False
+
+    # 从末尾往前扫：通常最新记录在最后，速度更快。
+    for i in range(len(lines) - 1, -1, -1):
+        line = lines[i].strip()
+        if not line:
+            continue
+
+        try:
+            record = json.loads(line)
+        except Exception:
+            continue
+
+        if not isinstance(record, dict):
+            continue
+
+        if str(record.get("type", "")) != "rule_apply":
+            continue
+
+        data = record.get("data")
+        if not isinstance(data, dict):
+            continue
+
+        if str(data.get("event_id", "")) == str(event_id):
             return True
 
     return False
@@ -613,7 +770,8 @@ class SaveDpHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         # /api/save-dp：保存 DP
         # /api/undo：撤销最近一次修改（可追溯）
-        if self.path != "/api/save-dp" and self.path != "/api/undo":
+        # /api/trigger-event：接收外部事件（为自定义扩展规则预留）
+        if self.path not in ("/api/save-dp", "/api/undo", "/api/trigger-event"):
             self.send_response(404)
             self.end_headers()
             return
@@ -690,6 +848,183 @@ class SaveDpHandler(BaseHTTPRequestHandler):
                 self.end_headers()
                 return
 
+        # /api/trigger-event：接收外部事件（第一步：先只打日志，不修改 DP）
+        if self.path == "/api/trigger-event":
+            # 读取请求体内容。
+            content_length = int(self.headers.get("Content-Length", "0"))
+            request_body = self.rfile.read(content_length)
+
+            try:
+                body_data = json.loads(request_body.decode("utf-8"))
+            except Exception:
+                # JSON 解析失败。
+                self.send_response(400)
+                self.end_headers()
+                return
+
+            if not isinstance(body_data, dict):
+                self.send_response(400)
+                self.end_headers()
+                return
+
+            # event：事件名，例如 git_commit / git_tag
+            # id：事件唯一标识，用于未来做“去重”（同一个事件只处理一次）
+            # data：事件补充信息（可选）
+            event_name = body_data.get("event", "")
+            event_id = body_data.get("id", "")
+            event_data = body_data.get("data", {})
+
+            if not isinstance(event_name, str) or event_name.strip() == "":
+                self.send_response(400)
+                self.end_headers()
+                return
+
+            if not isinstance(event_id, str) or event_id.strip() == "":
+                self.send_response(400)
+                self.end_headers()
+                return
+
+            if event_data is None:
+                event_data = {}
+            if not isinstance(event_data, dict):
+                self.send_response(400)
+                self.end_headers()
+                return
+
+            # 只打日志：用于确认“事件能送进 ChronOS”。
+            # 注意：data 可能很长，这里做一个简单截断，避免日志爆炸。
+            try:
+                safe_data_text = json.dumps(event_data, ensure_ascii=False)
+            except Exception:
+                safe_data_text = "{}"
+            if len(safe_data_text) > 200:
+                safe_data_text = safe_data_text[:200] + "...(truncated)"
+
+            log(
+                "trigger-event: "
+                + "event="
+                + str(event_name)
+                + " id="
+                + str(event_id)
+                + " data="
+                + safe_data_text
+            )
+
+            # 0.0.5 第二步：读取规则，并打印“命中哪些规则”。
+            # 这一步只做匹配，不修改 DP。
+            rules = load_extension_rules()
+            matched = match_rules_for_event(rules, event_name, event_data)
+
+            if len(matched) == 0:
+                log("trigger-event: matched_rules=0")
+            else:
+                # 只打印规则 id，避免日志太长。
+                ids = []
+                for r in matched:
+                    rid = r.get("id", "") if isinstance(r, dict) else ""
+                    if rid:
+                        ids.append(str(rid))
+                if len(ids) == 0:
+                    log(f"trigger-event: matched_rules={len(matched)}")
+                else:
+                    log(
+                        "trigger-event: matched_rules="
+                        + str(len(matched))
+                        + " ids="
+                        + ",".join(ids)
+                    )
+
+            # 0.0.5 第三步（本次要做）：去重检查。
+            # - 如果 event_id 已经处理过，就打印日志并跳过。
+            # - 如果没处理过：应用命中规则的 DP 变化，并写入 rule_apply history。
+            if history_has_rule_event_id(str(event_id)):
+                log("trigger-event: dedupe=hit (already_processed)")
+            else:
+                log("trigger-event: dedupe=miss")
+
+                # 计算本次事件要增加/减少的 DP。
+                # 注意：这里允许多条规则同时命中，dp_delta 会累加。
+                total_dp_delta = 0
+                applied_rule_ids = []
+                for r in matched:
+                    if not isinstance(r, dict):
+                        continue
+                    rid = r.get("id", "")
+                    if isinstance(rid, str) and rid.strip() != "":
+                        applied_rule_ids.append(rid.strip())
+
+                    try:
+                        delta = int(r.get("dp_delta", 0) or 0)
+                    except Exception:
+                        delta = 0
+                    total_dp_delta += delta
+
+                if len(applied_rule_ids) == 0 or total_dp_delta == 0:
+                    log("trigger-event: apply=skip (no_effect)")
+                else:
+                    # 在同一把锁里完成：读 state -> 改 dp -> 写 state -> 记 history。
+                    with STATE_IO_LOCK:
+                        state = read_state_file()
+                        old_dp = int(state.get("dp", 0) or 0)
+                        new_dp = old_dp + int(total_dp_delta)
+                        if new_dp < 0:
+                            new_dp = 0
+
+                        if new_dp != old_dp:
+                            state["dp"] = int(new_dp)
+                            if "gp" not in state:
+                                state["gp"] = 0
+
+                            write_json_atomic(STATE_FILE, state)
+
+                            # 为了避免 history 太大，这里只保留 event_data 的关键字段。
+                            stored_event_data = {}
+                            try:
+                                if isinstance(event_data, dict):
+                                    for k in ("hash", "message", "tag"):
+                                        if k in event_data:
+                                            stored_event_data[k] = event_data.get(k)
+                            except Exception:
+                                stored_event_data = {}
+
+                            append_state_history_with_data(
+                                event_type="rule_apply",
+                                actor="extension",
+                                note="应用自定义规则",
+                                data={
+                                    "event": str(event_name),
+                                    "event_id": str(event_id),
+                                    "rules": applied_rule_ids,
+                                    "dp_delta": int(total_dp_delta),
+                                    "event_data": stored_event_data,
+                                },
+                                changes=[
+                                    {"path": "dp", "from": old_dp, "to": int(new_dp)}
+                                ],
+                            )
+
+                            # 通知前端刷新。
+                            sse_broadcast("state", {"reason": "rule_apply"})
+                            log(
+                                "trigger-event: apply=ok dp "
+                                + str(old_dp)
+                                + " -> "
+                                + str(new_dp)
+                                + " (delta="
+                                + str(total_dp_delta)
+                                + ")"
+                            )
+                        else:
+                            log("trigger-event: apply=skip (dp_unchanged)")
+
+            response_body = json.dumps({"ok": True}).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(response_body)))
+            self.end_headers()
+            self.wfile.write(response_body)
+            return
+
         # 读取请求体内容。
         content_length = int(self.headers.get("Content-Length", "0"))
         request_body = self.rfile.read(content_length)
@@ -750,6 +1085,9 @@ if __name__ == "__main__":
     ensure_state_file_exists()
     ensure_crawler_state_file_exists()
     ensure_state_history_file_exists()
+
+    # 启动时自动安装 git hooks：让 commit/tag 能自动触发扩展规则。
+    ensure_git_hooks_installed()
 
     # 启动时也尝试接一次爬虫 pending（用于“程序没运行时错过 4:00”的补偿）。
     apply_crawler_pending_changes_once()

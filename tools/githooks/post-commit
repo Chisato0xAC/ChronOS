@@ -1,0 +1,12 @@
+#!/bin/sh
+
+# 这是 git 的 post-commit hook：每次提交完成后，通知 ChronOS。
+# 注意：hook 绝不能影响提交；任何失败都要静默忽略。
+
+root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+hash=$(git rev-parse HEAD 2>/dev/null) || exit 0
+
+python -X utf8 -u "$root/tools/send_event.py" git_commit "commit:$hash" "hash=$hash" >/dev/null 2>&1 || \
+py -X utf8 -u "$root/tools/send_event.py" git_commit "commit:$hash" "hash=$hash" >/dev/null 2>&1 || true
+
+exit 0

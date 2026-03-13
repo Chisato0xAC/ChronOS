@@ -1,0 +1,7 @@
+{
+  "id": "git_tag_version_900",
+  "event": "git_tag",
+  "tag_regex": "^v\\d+\\.\\d+\\.\\d+$",
+  "dp_delta": 900,
+  "note": "version tag +900DP"
+}
