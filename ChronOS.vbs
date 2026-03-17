@@ -52,7 +52,7 @@ ps = ps & "try{" & vbCrLf
 ps = ps & "  $server=Start-Process -FilePath $py -ArgumentList @('-X','utf8','-u','server.py') -WorkingDirectory $Root -WindowStyle Hidden -RedirectStandardOutput $out -RedirectStandardError $err -PassThru" & vbCrLf
 ps = ps & "  $ready=$false; for($i=0;$i -lt 50;$i++){Start-Sleep -Milliseconds 200; if(TestPort '127.0.0.1' $port){$ready=$true;break}; if($server.HasExited){break}}" & vbCrLf
 ps = ps & "  if(-not $ready){Msg ('Server start failed. Logs: ' + $out + ' ' + $err) 'ChronOS - Start Failed'; exit 1}" & vbCrLf
-ps = ps & "  $w=500; $h=360;" & vbCrLf
+ps = ps & "  $w=1000; $h=720;" & vbCrLf
 ps = ps & "  try { $scr=[System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea; $x=[Math]::Max(0,[int](($scr.Width-$w)/2)); $y=[Math]::Max(0,[int](($scr.Height-$h)/2)) } catch { $x=120; $y=80 }" & vbCrLf
 ps = ps & "  $pos='--window-position=' + $x + ',' + $y; $size='--window-size=' + $w + ',' + $h;" & vbCrLf
 ps = ps & "  $args=@('--app=' + $url, '--user-data-dir=' + $edgeProfile, '--no-first-run', '--disable-sync', '--disable-features=msUndersideButton', $pos, $size)" & vbCrLf

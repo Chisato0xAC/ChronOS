@@ -19,12 +19,129 @@ const setDpButtonElement = document.getElementById("setDpButton");
 // 这行代码拿到撤销按钮。
 const undoButtonElement = document.getElementById("undoButton");
 
+// 这行代码拿到历史记录显示区域。
+const historyListElement = document.getElementById("historyList");
+
 // 这个函数负责把内存中的数值显示到页面上。
 function render() {
   // 这行把 DP 显示为整数文本。
   currentDpElement.textContent = currentDp;
   // 这行把 GP 保留两位小数后再显示。
   currentGpElement.textContent = currentGp.toFixed(2);
+}
+
+// 这个函数负责把历史记录显示到页面上。
+function renderHistory(historyRecords) {
+  // 如果后端没返回数组，就显示“暂无”。
+  if (!Array.isArray(historyRecords) || historyRecords.length === 0) {
+    historyListElement.textContent = "（暂无）";
+    return;
+  }
+
+  // 每条记录一行，尽量用最直白的文字展示。
+  // 显示格式（定宽对齐）：
+  // 2026-03-14 12:00:00  save_dp        dp: 10 -> 12 (+2)   备注
+  const lines = [];
+
+  // 简单对齐用的宽度（不用 CSS，只靠空格对齐）。
+  // 注意：这里的“完全对齐”只在等宽字体里成立；<pre> 默认是等宽字体。
+  const typeWidth = 14;
+  const changeWidth = 34;
+
+  function fitText(text, width) {
+    // 把文本限制在固定宽度内，避免某一列太长把后面的列挤歪。
+    // 如果超长，用 "..." 截断（只用 ASCII）。
+    const s = String(text || "");
+    if (s.length <= width) {
+      return s;
+    }
+    if (width <= 3) {
+      return s.slice(0, width);
+    }
+    return s.slice(0, width - 3) + "...";
+  }
+
+  function padRight(text, width) {
+    const s = fitText(text, width);
+    if (s.length >= width) {
+      return s;
+    }
+    return s + " ".repeat(width - s.length);
+  }
+
+  for (let i = 0; i < historyRecords.length; i = i + 1) {
+    const item = historyRecords[i] || {};
+    const text = String(item.text || "");
+    const type = String(item.type || "");
+    const note = String(item.note || "");
+
+    // 把 changes 里 dp/gp 的变化简单拼出来。
+    let changeText = "";
+    if (Array.isArray(item.changes)) {
+      const parts = [];
+      for (let j = 0; j < item.changes.length; j = j + 1) {
+        const ch = item.changes[j] || {};
+        const path = String(ch.path || "");
+        const fromValue = ch.from;
+        const toValue = ch.to;
+        if (path === "dp" || path === "gp") {
+          // 尽量把“变化值(delta)”也显示出来，方便一眼看懂。
+          const fromNumber = Number(fromValue);
+          const toNumber = Number(toValue);
+
+          let deltaText = "";
+          if (!Number.isNaN(fromNumber) && !Number.isNaN(toNumber)) {
+            const delta = toNumber - fromNumber;
+            // dp 一般是整数；gp 可能是小数。
+            let deltaDisplay = String(delta);
+            if (path === "dp") {
+              deltaDisplay = String(Math.floor(delta));
+            } else {
+              deltaDisplay = String(delta.toFixed(2));
+            }
+
+            if (delta > 0) {
+              deltaText = " (+" + deltaDisplay + ")";
+            } else if (delta < 0) {
+              deltaText = " (" + deltaDisplay + ")";
+            } else {
+              deltaText = " (0)";
+            }
+          }
+
+          parts.push(path + ": " + String(fromValue) + " -> " + String(toValue) + " " + deltaText);
+        }
+      }
+      if (parts.length > 0) {
+        changeText = parts.join("; ");
+      }
+    }
+
+    // 时间固定 19 位：YYYY-MM-DD HH:MM:SS
+    const left = padRight(text, 19);
+    const midType = padRight(type, typeWidth);
+    const midChange = padRight(changeText, changeWidth);
+    const rightNote = note;
+    // 用 2 个空格当“列分隔”，更容易看。
+    lines.push(left + "  " + midType + "  " + midChange + "  " + rightNote);
+  }
+
+  historyListElement.textContent = lines.join("\n");
+}
+
+// 这个函数从后端读取历史记录。
+async function loadHistoryFromServer() {
+  try {
+    const response = await fetch("/api/state-history?limit=50", {
+      cache: "no-store",
+    });
+    const result = await response.json();
+    // 服务端返回的 items 是“最新在上”。
+    renderHistory(result.items);
+  } catch (error) {
+    // 读取失败就显示一行提示，不影响 DP/GP 使用。
+    historyListElement.textContent = "（历史记录读取失败）";
+  }
 }
 
 // 这个函数统一处理 DP 更新，保证规则一致。
@@ -83,6 +200,7 @@ function startStateEventStream() {
   // 收到名为 state 的事件时，重新读取 data/state.json。
   source.addEventListener("state", function () {
     loadStateFromFile();
+    loadHistoryFromServer();
   });
 
   // 连接出错时，浏览器会自动重连。
@@ -128,6 +246,7 @@ async function undoLastChange() {
 
 // 这行执行读取 JSON 并更新页面的流程。
 loadStateFromFile();
+loadHistoryFromServer();
 startStateEventStream();
 
 // 这个函数把 DP 增加 1，并刷新页面。

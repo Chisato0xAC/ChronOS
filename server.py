@@ -9,6 +9,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from chronos_config import (
+    DAY_BOUNDARY_HOUR,
+    DAY_BOUNDARY_MINUTE,
+    DAY_BOUNDARY_SECOND,
+)
+
 
 # 这个路径指向前端目录。
 SRC_DIR = Path(__file__).resolve().parent / "src"
@@ -44,8 +50,7 @@ EXT_RULES_DIR = Path(__file__).resolve().parent / "extensions" / "rules"
 # git hooks 模板目录（项目自带）。
 GITHOOKS_TEMPLATES_DIR = Path(__file__).resolve().parent / "tools" / "githooks"
 
-# 一天的分界线（北京时间）：4:00
-DAY_BOUNDARY_HOUR = 4
+# 一天的分界线：统一在 chronos_config.py 配置
 
 
 def ensure_utf8_stdio() -> None:
@@ -68,12 +73,15 @@ def log(message: str) -> None:
     # 统一的日志输出：
     # - 无论 stdout 是否被重定向到文件，都强制 flush
     # - 这样 ChronOS.vbs 的 server.out.log 能实时看到输出
-    print(message, flush=True)
+    # 额外加上时间戳，方便你回看时知道“什么时候发生的”。
+    now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{now_text}] {message}", flush=True)
 
 
 def log_error(message: str) -> None:
     # 错误日志：写到 stderr，并强制 flush
-    print(message, file=sys.stderr, flush=True)
+    now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{now_text}] [ERROR] {message}", file=sys.stderr, flush=True)
 
 
 # 如果 data/state.json 不存在，就创建一个默认文件。
@@ -593,7 +601,12 @@ def ensure_crawler_state_file_exists() -> None:
 
 def get_next_trigger_time(now: datetime) -> datetime:
     # 返回下一次要触发爬取的时间点（4:00）。
-    today_4am = now.replace(hour=DAY_BOUNDARY_HOUR, minute=0, second=0, microsecond=0)
+    today_4am = now.replace(
+        hour=DAY_BOUNDARY_HOUR,
+        minute=DAY_BOUNDARY_MINUTE,
+        second=DAY_BOUNDARY_SECOND,
+        microsecond=0,
+    )
     if now < today_4am:
         return today_4am
     return today_4am + timedelta(days=1)
@@ -602,9 +615,41 @@ def get_next_trigger_time(now: datetime) -> datetime:
 def run_crawler_once() -> None:
     # 启动一次爬虫脚本。
     # 这个脚本会自己判断“今天窗口是否已爬取”，所以重复启动也不会重复爬取。
+    # 但为了避免“每次程序启动都启动一次爬虫进程”，这里先读取 data/crawler_state.json
+    # 做一次轻量判断：只有确实需要爬取时才启动爬虫脚本。
     if not CRAWLER_SCRIPT.exists():
         log_error(f"Crawler script not found: {CRAWLER_SCRIPT}")
         return
+
+    # 计算“最近一个已完成日”的触发点时间（默认就是每天 4:00）。
+    # - 例如：现在是 10:00，则触发点是今天 4:00
+    # - 例如：现在是 02:00，则触发点是昨天 4:00
+    now = datetime.now()
+    today_4am = now.replace(
+        hour=DAY_BOUNDARY_HOUR,
+        minute=DAY_BOUNDARY_MINUTE,
+        second=DAY_BOUNDARY_SECOND,
+        microsecond=0,
+    )
+    if now >= today_4am:
+        latest_completed_trigger = today_4am
+    else:
+        latest_completed_trigger = today_4am - timedelta(days=1)
+
+    # 如果 crawler_state 里已经记录过这个触发点，就说明“今天窗口已经爬过了”。
+    try:
+        crawler_state = read_crawler_state_file()
+        last_trigger_ts = int(crawler_state.get("last_trigger_ts", 0) or 0)
+        if last_trigger_ts == int(latest_completed_trigger.timestamp()):
+            last_text = str(crawler_state.get("last_trigger_text", "")).strip()
+            if last_text:
+                log(f"调度器：今天窗口已爬取（触发点 {last_text}），跳过启动爬虫")
+            else:
+                log("调度器：今天窗口已爬取，跳过启动爬虫")
+            return
+    except Exception:
+        # 读取失败就不拦截，让爬虫脚本自己判断（保证稳健）。
+        pass
 
     # 如果 auth 文件存在，但 sessdata 为空，就不反复启动爬虫。
     # （第一次没有文件时仍允许启动：爬虫会自动生成模板文件）
@@ -645,9 +690,9 @@ def run_crawler_once() -> None:
 
 def crawler_scheduler_loop() -> None:
     # 这是一个后台循环：
-    # 1) 主程序启动时先跑一次（用于补爬）
+    # 1) 主程序启动时先检查一次：只有“需要补爬”才会启动爬虫
     # 2) 然后每天到 4:00 再跑一次
-    log("调度器：准备启动爬虫工具")
+    log("调度器：检测爬虫状态")
 
     try:
         run_crawler_once()
@@ -681,6 +726,84 @@ def crawler_scheduler_loop() -> None:
 class SaveDpHandler(BaseHTTPRequestHandler):
     # 这里处理浏览器的 GET 请求，用来返回页面和脚本文件。
     def do_GET(self):
+        # /api/state-history：返回最近的 state 历史记录（用于前端展示）。
+        if self.path.startswith("/api/state-history"):
+            try:
+                # limit 默认 50，最大 200。
+                limit = 50
+                if "?" in self.path:
+                    query = self.path.split("?", 1)[1]
+                    parts = query.split("&")
+                    for p in parts:
+                        if p.startswith("limit="):
+                            raw = p.split("=", 1)[1]
+                            try:
+                                limit = int(raw)
+                            except Exception:
+                                limit = 50
+
+                if limit < 1:
+                    limit = 1
+                if limit > 200:
+                    limit = 200
+
+                items = []
+                undone_ts = set()
+                if STATE_HISTORY_FILE.exists():
+                    # 直接按行读取（JSONL）
+                    lines = STATE_HISTORY_FILE.read_text(encoding="utf-8").splitlines()
+
+                    # 从最新开始往前扫：
+                    # - 遇到 undo：记录 undo_of_ts，并且不把 undo 本身放进 items
+                    # - 遇到普通记录：如果它的 ts 在 undone_ts 里，说明已被撤销，跳过
+                    # - 最终只返回“当前仍有效”的历史记录
+                    for i in range(len(lines) - 1, -1, -1):
+                        raw = lines[i].strip()
+                        if raw == "":
+                            continue
+
+                        try:
+                            record = json.loads(raw)
+                        except Exception:
+                            continue
+
+                        if not isinstance(record, dict):
+                            continue
+
+                        record_type = record.get("type")
+                        if record_type == "undo":
+                            data = record.get("data")
+                            if isinstance(data, dict):
+                                undo_of_ts = data.get("undo_of_ts")
+                                if isinstance(undo_of_ts, int):
+                                    undone_ts.add(undo_of_ts)
+                            continue
+
+                        ts = record.get("ts")
+                        if isinstance(ts, int) and ts in undone_ts:
+                            continue
+
+                        items.append(record)
+                        if len(items) >= limit:
+                            break
+
+                response_body = json.dumps(
+                    {"ok": True, "items": items, "limit": limit},
+                    ensure_ascii=False,
+                ).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", str(len(response_body)))
+                self.end_headers()
+                self.wfile.write(response_body)
+                return
+            except Exception as e:
+                log_error(f"读取历史记录失败: {e}")
+                self.send_response(500)
+                self.end_headers()
+                return
+
         # SSE：前端连接这个接口，等待“state 变化”的通知。
         if self.path == "/api/state-events":
             q = None

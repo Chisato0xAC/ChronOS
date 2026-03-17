@@ -5,18 +5,28 @@
 </head>
 
 <body>
-  <div style="display: flex; gap: 8px;">
-    <div>DP:</div>
-    <div id="currentDp">0</div>
-  </div>
 
+  <h3>当前数值</h3>
+  <table>
+    <tr>
+      <td>DP</td>
+      <td id="currentDp">0</td>
+    </tr>
+    <tr>
+      <td>GP</td>
+      <td id="currentGp">0.00</td>
+    </tr>
+  </table>
+
+  <h3>修改 DP</h3>
   <div>
     <button id="addDpButton">DP +1</button>
     <button id="minusDpButton">DP -1</button>
   </div>
 
   <div>
-    <input id="dpInput" type="text" placeholder="输入增减表达式，例如 +10-3" />
+    <div>表达式（例：+10-3）</div>
+    <input id="dpInput" type="text" />
     <button id="setDpButton">应用表达式</button>
   </div>
 
@@ -24,10 +34,8 @@
     <button id="undoButton">撤销（Undo）</button>
   </div>
 
-  <div style="display: flex; gap: 8px;">
-    <div>GP:</div>
-    <div id="currentGp">0.00</div>
-  </div>
+  <div>历史记录（最新在上）：</div>
+  <pre id="historyList">（暂无）</pre>
 
   <script src="main.js">
   </script>
