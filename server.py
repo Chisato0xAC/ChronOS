@@ -70,18 +70,39 @@ def ensure_utf8_stdio() -> None:
 
 
 def log(message: str) -> None:
-    # 统一的日志输出：
-    # - 无论 stdout 是否被重定向到文件，都强制 flush
-    # - 这样 ChronOS.vbs 的 server.out.log 能实时看到输出
-    # 额外加上时间戳，方便你回看时知道“什么时候发生的”。
+    # 统一日志输出（INFO + SERVER）。
+    # 这样普通日志、错误日志、HTTP 日志都能对齐成同一种结构。
     now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{now_text}] {message}", flush=True)
+    print(f"[{now_text}] [INFO] [SERVER] {message}", flush=True)
 
 
 def log_error(message: str) -> None:
-    # 错误日志：写到 stderr，并强制 flush
+    # 错误日志：和普通日志同结构，只是级别改为 ERROR。
     now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{now_text}] [ERROR] {message}", file=sys.stderr, flush=True)
+    print(f"[{now_text}] [ERROR] [SERVER] {message}", file=sys.stderr, flush=True)
+
+
+def strip_line_timestamp_prefix(text: str) -> str:
+    # 把一行开头的 "[YYYY-MM-DD HH:MM:SS] " 去掉。
+    # 这样把外部脚本日志转发到主日志时，不会出现双时间戳。
+    raw = str(text or "")
+    m = re.match(r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\]\s*(.*)$", raw)
+    if not m:
+        return raw
+    return m.group(1)
+
+
+def log_external(source: str, message: str, level: str = "INFO") -> None:
+    # 统一转发外部日志（比如爬虫）：
+    # 格式和主日志一致，只是来源改成 source。
+    now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    body = strip_line_timestamp_prefix(message)
+    lvl = str(level or "INFO").upper().strip()
+    src = str(source or "EXTERNAL").upper().strip()
+    if lvl == "ERROR":
+        print(f"[{now_text}] [ERROR] [{src}] {body}", file=sys.stderr, flush=True)
+        return
+    print(f"[{now_text}] [INFO] [{src}] {body}", flush=True)
 
 
 # 如果 data/state.json 不存在，就创建一个默认文件。
@@ -675,10 +696,18 @@ def run_crawler_once() -> None:
         )
 
         if proc.stdout:
-            log(proc.stdout.strip())
+            for line in str(proc.stdout).splitlines():
+                text = str(line).strip()
+                if text == "":
+                    continue
+                log_external("CRAWLER", text, "INFO")
         if proc.returncode != 0:
             if proc.stderr:
-                log_error(proc.stderr.strip())
+                for line in str(proc.stderr).splitlines():
+                    text = str(line).strip()
+                    if text == "":
+                        continue
+                    log_external("CRAWLER", text, "ERROR")
             log_error(f"爬虫脚本退出码: {proc.returncode}")
             return
 
@@ -718,12 +747,23 @@ def crawler_scheduler_loop() -> None:
 
         # 下一次触发：再加 1 天
         next_trigger = next_trigger + timedelta(days=1)
-        log(f"调度器：下一次爬虫触发时间 {next_trigger.strftime('%Y-%m-%d %H:%M:%S')}")
+        log(f"调度器：下一次爬虫触发 {next_trigger.strftime('%Y-%m-%d %H:%M:%S')}")
         time.sleep(1)
 
 
 # 这个处理器只负责一个接口：保存 DP 到 JSON 文件。
 class SaveDpHandler(BaseHTTPRequestHandler):
+    def log_message(self, format, *args):
+        # 统一 HTTP 访问日志格式（INFO + HTTP）。
+        try:
+            detail = format % args
+        except Exception:
+            detail = format
+
+        now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        client = self.address_string()
+        print(f"[{now_text}] [INFO] [HTTP] {client} {detail}", flush=True)
+
     # 这里处理浏览器的 GET 请求，用来返回页面和脚本文件。
     def do_GET(self):
         # /api/state-history：返回最近的 state 历史记录（用于前端展示）。

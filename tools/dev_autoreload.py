@@ -1,0 +1,237 @@
+import subprocess
+import sys
+import threading
+import time
+from datetime import datetime
+from pathlib import Path
+
+
+# 项目根目录：ChronOS/
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+LOG_DIR = PROJECT_ROOT / "logs"
+SERVER_LOG_FILE = LOG_DIR / "server.log"
+
+# 这些类型的文件改动后，会触发自动重启。
+WATCH_SUFFIXES = {
+    ".py",
+    ".js",
+    ".html",
+    ".json",
+    ".md",
+    ".bat",
+    ".vbs",
+}
+
+# 这些目录不参与监听，避免无关文件触发重启。
+IGNORE_DIR_NAMES = {
+    ".git",
+    "__pycache__",
+    ".venv",
+    "venv",
+    "logs",
+}
+
+# 控制台输出锁：避免多线程同时 print 造成一行被拆开。
+PRINT_LOCK = threading.Lock()
+
+
+def append_log_file(line: str) -> None:
+    # 统一日志文件：所有输出都追加到 logs/server.log。
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    with SERVER_LOG_FILE.open("a", encoding="utf-8", newline="\n") as f:
+        f.write(str(line) + "\n")
+
+
+def emit_line(line: str, to_stderr: bool = False) -> None:
+    # 同时输出到控制台 + 统一日志文件（单文件）。
+    with PRINT_LOCK:
+        if to_stderr:
+            print(line, file=sys.stderr, flush=True)
+        else:
+            print(line, flush=True)
+        append_log_file(line)
+
+
+def print_boundary(title: str) -> None:
+    # 打印明显分隔线，方便区分“重启前/重启后”。
+    line = "=" * 72
+    emit_line(line)
+    emit_line(f"[{now_text()}] [INFO] [RELOADER] {title}")
+    emit_line(line)
+
+
+def now_text() -> str:
+    # 统一时间文本格式。
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def log(message: str) -> None:
+    # 统一输出格式，方便和主服务日志一起看。
+    emit_line(f"[{now_text()}] [INFO] [RELOADER] {message}")
+
+
+def log_error(message: str) -> None:
+    # 错误输出。
+    emit_line(f"[{now_text()}] [ERROR] [RELOADER] {message}", to_stderr=True)
+
+
+def forward_stream_lines(stream, to_stderr: bool) -> None:
+    # 把子进程的输出按“整行”转发到当前控制台。
+    # 这样可以减少“半行拼接/换行异常”。
+    try:
+        for raw in stream:
+            line = str(raw).rstrip("\r\n")
+            emit_line(line, to_stderr=to_stderr)
+    except Exception:
+        # 转发失败不影响主流程。
+        return
+
+
+def should_ignore(file_path: Path) -> bool:
+    # 只要路径里出现忽略目录名，就跳过。
+    for part in file_path.parts:
+        if part in IGNORE_DIR_NAMES:
+            return True
+    return False
+
+
+def build_snapshot() -> dict:
+    # 扫描项目文件，记录每个文件的最后修改时间。
+    # 用 mtime_ns（纳秒）可以减少时间精度导致的漏检。
+    snap = {}
+    for file_path in PROJECT_ROOT.rglob("*"):
+        if not file_path.is_file():
+            continue
+        if should_ignore(file_path):
+            continue
+        if file_path.suffix.lower() not in WATCH_SUFFIXES:
+            continue
+
+        try:
+            snap[str(file_path)] = file_path.stat().st_mtime_ns
+        except Exception:
+            # 文件可能在扫描时被临时占用/删除，跳过即可。
+            continue
+
+    return snap
+
+
+def find_changed_files(old_snap: dict, new_snap: dict) -> list:
+    # 找出“新增、删除、修改”的文件。
+    changed = []
+
+    old_keys = set(old_snap.keys())
+    new_keys = set(new_snap.keys())
+
+    for key in sorted(new_keys - old_keys):
+        changed.append(f"新增: {Path(key).relative_to(PROJECT_ROOT)}")
+
+    for key in sorted(old_keys - new_keys):
+        changed.append(f"删除: {Path(key).relative_to(PROJECT_ROOT)}")
+
+    for key in sorted(old_keys & new_keys):
+        if old_snap[key] != new_snap[key]:
+            changed.append(f"修改: {Path(key).relative_to(PROJECT_ROOT)}")
+
+    return changed
+
+
+def start_server() -> subprocess.Popen:
+    # 启动主服务（server.py）。
+    cmd = [sys.executable, "-X", "utf8", "-u", "server.py"]
+    log("启动 server.py")
+    proc = subprocess.Popen(
+        cmd,
+        cwd=str(PROJECT_ROOT),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+
+    if proc.stdout is not None:
+        threading.Thread(
+            target=forward_stream_lines,
+            args=(proc.stdout, False),
+            daemon=True,
+        ).start()
+    if proc.stderr is not None:
+        threading.Thread(
+            target=forward_stream_lines,
+            args=(proc.stderr, True),
+            daemon=True,
+        ).start()
+
+    return proc
+
+
+def stop_server(proc: subprocess.Popen) -> None:
+    # 停止主服务，避免残留进程占端口。
+    if proc.poll() is not None:
+        return
+
+    proc.terminate()
+    try:
+        proc.wait(timeout=5)
+        log("server.py 已停止")
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=5)
+        log("server.py 已强制停止")
+
+
+def main() -> int:
+    # 自动重启入口。
+    # 逻辑：先启动一次 server，再每秒轮询文件变化，变化就重启。
+    restart_count = 0
+    print_boundary("自动重启器已启动")
+
+    last_snapshot = build_snapshot()
+    server_proc = start_server()
+
+    try:
+        while True:
+            # 如果服务意外退出，也自动拉起。
+            if server_proc.poll() is not None:
+                log_error(
+                    f"server.py 已退出，退出码={server_proc.returncode}，准备重启"
+                )
+                restart_count = restart_count + 1
+                print_boundary(f"重启开始（第 {restart_count} 次，原因：服务意外退出）")
+                time.sleep(1)
+                server_proc = start_server()
+                print_boundary(f"重启完成（第 {restart_count} 次）")
+                last_snapshot = build_snapshot()
+                continue
+
+            time.sleep(1)
+            current_snapshot = build_snapshot()
+            changed_files = find_changed_files(last_snapshot, current_snapshot)
+            if not changed_files:
+                continue
+
+            log(f"检测到文件变化，共 {len(changed_files)} 处")
+            log(changed_files[0])
+
+            restart_count = restart_count + 1
+            print_boundary(
+                f"重启开始（第 {restart_count} 次，原因：{changed_files[0]}）"
+            )
+            stop_server(server_proc)
+            time.sleep(0.5)
+            server_proc = start_server()
+            print_boundary(f"重启完成（第 {restart_count} 次）")
+            last_snapshot = current_snapshot
+    except KeyboardInterrupt:
+        log("收到 Ctrl+C，准备退出")
+        stop_server(server_proc)
+        return 0
+    except Exception as e:
+        log_error(f"自动重启器异常: {e}")
+        stop_server(server_proc)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

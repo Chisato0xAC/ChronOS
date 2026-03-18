@@ -305,3 +305,21 @@ setDpButtonElement.addEventListener("click", setDpFromInput);
 
 // 点击撤销按钮时，请求后端撤销。
 undoButtonElement.addEventListener("click", undoLastChange);
+
+// ---------------------------
+// 通知功能（只做“接线”，逻辑在 notify.js）
+// ---------------------------
+
+// 这行代码拿到“通知测试”按钮。
+const notifyButtonElement = document.getElementById("notifyButton");
+
+// 点击“通知测试”按钮时，调用通知模块。
+notifyButtonElement.addEventListener("click", function () {
+  // 这里不写通知细节，只负责调用。
+  if (typeof window.sendSystemNotification !== "function") {
+    alert("通知模块未加载：请确认 notify.js 已被引入。");
+    return;
+  }
+
+  window.sendSystemNotification("ChronOS 通知", "这是一条测试通知。");
+});
