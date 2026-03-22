@@ -4,7 +4,7 @@ set PYTHONUTF8=1
 set PYTHONIOENCODING=utf-8
 cd /d %~dp0
 
-rem Dev launcher (console visible)
+rem This bat does only two things: 1) start server.py via dev_autoreload, 2) open browser frontend.
 start http://127.0.0.1:8000
 
 rem Prefer python, fallback to py
