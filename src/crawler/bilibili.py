@@ -22,11 +22,21 @@ from chronos_config import (
 # 2) 把所有视频时长相加，换算成 DP 变更值（分钟取整）
 
 # --- 配置区 ---
-# 账号信息文件（放在 data/ 里；data/ 已在 .gitignore 中，不会提交到 git）
-AUTH_FILE = Path(__file__).resolve().parents[2] / "data" / "bilibili_auth.json"
+# 账号信息文件（放在 config/ 里；和运行数据分开）
+AUTH_FILE = Path(__file__).resolve().parents[2] / "config" / "bilibili_auth.json"
 
-# B 站扣除规则文件（放在 data/ 里，方便用户自己改数值）
-BILIBILI_RULE_FILE = Path(__file__).resolve().parents[2] / "data" / "bilibili_rule.json"
+# 旧版账号文件位置（兼容迁移用）
+LEGACY_AUTH_FILE = Path(__file__).resolve().parents[2] / "data" / "bilibili_auth.json"
+
+# B 站扣除规则文件（放在 config/，和运行数据分开）
+BILIBILI_RULE_FILE = (
+    Path(__file__).resolve().parents[2] / "config" / "bilibili_rule.json"
+)
+
+# 旧版规则文件位置（兼容迁移用）
+LEGACY_BILIBILI_RULE_FILE = (
+    Path(__file__).resolve().parents[2] / "data" / "bilibili_rule.json"
+)
 
 HISTORY_API_URL = "https://api.bilibili.com/x/web-interface/history/cursor"
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -61,9 +71,20 @@ def build_headers(sessdata: str) -> dict:
 
 
 def ensure_auth_file_exists() -> None:
-    # 确保 data/bilibili_auth.json 存在。
+    # 确保 config/bilibili_auth.json 存在。
     # 用户只需要把 SESSDATA 填进去。
     AUTH_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+    # 兼容：如果旧位置有账号文件，且新位置还没有，则自动迁移。
+    if (not AUTH_FILE.exists()) and LEGACY_AUTH_FILE.exists():
+        try:
+            AUTH_FILE.write_text(
+                LEGACY_AUTH_FILE.read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
+
     if AUTH_FILE.exists():
         return
     default_auth = {"sessdata": ""}
@@ -94,9 +115,20 @@ def parse_duration_text_to_seconds(text: str) -> int:
 
 
 def ensure_bilibili_rule_file_exists() -> None:
-    # 确保 data/bilibili_rule.json 存在。
+    # 确保 config/bilibili_rule.json 存在。
     # 用户可以在这个文件里改阈值和百分比。
     BILIBILI_RULE_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+    # 兼容：如果旧位置有规则文件，且新位置还没有，则自动迁移。
+    if (not BILIBILI_RULE_FILE.exists()) and LEGACY_BILIBILI_RULE_FILE.exists():
+        try:
+            BILIBILI_RULE_FILE.write_text(
+                LEGACY_BILIBILI_RULE_FILE.read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
+
     if BILIBILI_RULE_FILE.exists():
         return
 
@@ -174,7 +206,7 @@ def load_bilibili_rule() -> dict:
 
 
 def get_sessdata_from_file() -> str:
-    # 从 data/bilibili_auth.json 读取 SESSDATA
+    # 从 config/bilibili_auth.json 读取 SESSDATA
     ensure_auth_file_exists()
     auth = json.loads(AUTH_FILE.read_text(encoding="utf-8"))
     sessdata = str(auth.get("sessdata", "")).strip()
@@ -326,6 +358,19 @@ def mark_crawled(
     crawler_state["planned_dp_after"] = int(planned_dp_after)
     crawler_state["dp_delta_kind"] = "deduct"
 
+    # 新结构（精简版）：把“最近一次爬取结果”收敛到 last 对象。
+    # 兼容策略：先新增，不删除旧字段，避免影响旧读取代码。
+    crawler_state["last"] = {
+        "trigger_ts": int(trigger_time.timestamp()),
+        "window_start_ts": int(window_start.timestamp()),
+        "window_end_ts": int(window_end.timestamp()),
+        "run_ts": int(run_time.timestamp()),
+        "total_minutes": int(total_minutes),
+        "dp_delta": int(dp_delta),
+        "planned_dp_after": int(planned_dp_after),
+        "dp_delta_kind": "deduct",
+    }
+
     # 预留“待扣除 DP”的机制：
     # - 把这次窗口产生的 dp_delta 写成一个“待处理事件”
     # - 未来做 DP 变更记录系统时，由主程序读取并正式扣除（并写入历史）
@@ -342,6 +387,20 @@ def mark_crawled(
         f"{int(trigger_time.timestamp())}_{int(window_start.timestamp())}_"
         f"{int(window_end.timestamp())}_{int(dp_delta)}"
     )
+
+    # 新结构（精简版）：把 pending_* 收敛到 pending 对象。
+    # 兼容策略：先新增，不删除旧字段，避免影响旧读取代码。
+    crawler_state["pending"] = {
+        "status": "pending",
+        "id": str(crawler_state["pending_dp_id"]),
+        "delta": int(dp_delta),
+        "trigger_ts": int(trigger_time.timestamp()),
+        "window_start_ts": int(window_start.timestamp()),
+        "window_end_ts": int(window_end.timestamp()),
+        "created_ts": int(run_time.timestamp()),
+        "reason": "crawler_window",
+    }
+
     return crawler_state
 
 
@@ -479,7 +538,7 @@ def main() -> None:
 
     sessdata = get_sessdata_from_file()
     if not sessdata:
-        log("爬虫：缺少 sessdata，请先填写 data/bilibili_auth.json")
+        log("爬虫：缺少 sessdata，请先填写 config/bilibili_auth.json")
         return
 
     crawler_state = load_crawler_state()

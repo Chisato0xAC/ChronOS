@@ -1,47 +1,77 @@
 <!DOCTYPE html>
+<html>
 
 <head>
+  <meta charset="utf-8" />
   <title>ChronOS</title>
 </head>
 
 <body>
+  <header>
+    <h1>ChronOS</h1>
+  </header>
 
-  <h3>当前数值</h3>
-  <table>
-    <tr>
-      <td>DP</td>
-      <td id="currentDp">0</td>
-    </tr>
-    <tr>
-      <td>GP</td>
-      <td id="currentGp">0.00</td>
-    </tr>
-  </table>
+  <main>
+    <section aria-labelledby="statusTitle">
+      <h2 id="statusTitle">状态区</h2>
 
-  <h3>修改 DP</h3>
-  <div>
-    <button id="addDpButton">DP +1</button>
-    <button id="minusDpButton">DP -1</button>
-  </div>
+      <article aria-labelledby="currentValueTitle">
+        <h3 id="currentValueTitle">当前数值</h3>
+        <table>
+          <tr>
+            <th scope="row">DP</th>
+            <td id="currentDp">0</td>
+          </tr>
+          <tr>
+            <th scope="row">GP</th>
+            <td id="currentGp">0.00</td>
+          </tr>
+        </table>
+      </article>
 
-  <div>
-    <div>表达式（例：+10-3）</div>
-    <input id="dpInput" type="text" />
-    <button id="setDpButton">应用表达式</button>
-  </div>
+      <article aria-labelledby="serviceStatusTitle">
+        <h3 id="serviceStatusTitle">服务状态</h3>
+        <p id="serviceStatus">正在读取服务状态...</p>
+      </article>
+    </section>
 
-  <div>
-    <button id="undoButton">撤销（Undo）</button>
-  </div>
+    <section aria-labelledby="actionTitle">
+      <h2 id="actionTitle">操作区</h2>
 
-  <h3>通知功能</h3>
-  <div>
-    <button id="notifyButton">发送一条系统通知（测试）</button>
-  </div>
+      <article aria-labelledby="dpActionTitle">
+        <h3 id="dpActionTitle">修改 DP</h3>
 
-  <div>历史记录（最新在上）：</div>
-  <pre id="historyList">（暂无）</pre>
+        <div>
+          <button id="addDpButton" type="button">DP +1</button>
+          <button id="minusDpButton" type="button">DP -1</button>
+        </div>
+
+        <div>
+          <label for="dpInput">表达式（例：+10-3）</label>
+          <input id="dpInput" type="text" />
+          <button id="setDpButton" type="button">应用表达式</button>
+        </div>
+
+        <div>
+          <button id="undoButton" type="button">撤销（Undo）</button>
+        </div>
+      </article>
+
+      <article aria-labelledby="notifyTitle">
+        <h3 id="notifyTitle">通知功能</h3>
+        <button id="notifyButton" type="button">发送一条系统通知（测试）</button>
+      </article>
+    </section>
+
+    <section aria-labelledby="historyTitle">
+      <h2 id="historyTitle">历史区</h2>
+      <h3>历史记录</h3>
+      <pre id="historyList">（暂无）</pre>
+    </section>
+  </main>
 
   <script src="notify.js"></script>
   <script src="main.js"></script>
 </body>
+
+</html>

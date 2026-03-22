@@ -1,3 +1,4 @@
+import json
 import subprocess
 import sys
 import threading
@@ -10,29 +11,77 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 LOG_DIR = PROJECT_ROOT / "logs"
 SERVER_LOG_FILE = LOG_DIR / "server.log"
+WATCH_CONFIG_FILE = PROJECT_ROOT / "config" / "reload_watch.json"
 
-# 这些类型的文件改动后，会触发自动重启。
-WATCH_SUFFIXES = {
+# 默认：这些类型的文件改动后，会触发自动重启。
+DEFAULT_WATCH_SUFFIXES = {
     ".py",
     ".js",
-    ".html",
     ".json",
-    ".md",
     ".bat",
     ".vbs",
 }
 
-# 这些目录不参与监听，避免无关文件触发重启。
-IGNORE_DIR_NAMES = {
+# 默认：这些目录不参与监听，避免无关文件触发重启。
+DEFAULT_IGNORE_DIR_NAMES = {
     ".git",
     "__pycache__",
     ".venv",
     "venv",
     "logs",
+    "data",
 }
 
 # 控制台输出锁：避免多线程同时 print 造成一行被拆开。
 PRINT_LOCK = threading.Lock()
+
+# 运行时配置（优先读 config/reload_watch.json，失败时回退默认值）。
+WATCH_SUFFIXES = set(DEFAULT_WATCH_SUFFIXES)
+IGNORE_DIR_NAMES = set(DEFAULT_IGNORE_DIR_NAMES)
+
+
+def load_watch_config() -> None:
+    # 从 config/reload_watch.json 读取监听配置。
+    # 读取失败时回退默认配置，保证服务能继续运行。
+    global WATCH_SUFFIXES
+    global IGNORE_DIR_NAMES
+
+    watch_suffixes = set(DEFAULT_WATCH_SUFFIXES)
+    ignore_dir_names = set(DEFAULT_IGNORE_DIR_NAMES)
+
+    try:
+        if WATCH_CONFIG_FILE.exists() and WATCH_CONFIG_FILE.is_file():
+            raw = WATCH_CONFIG_FILE.read_text(encoding="utf-8")
+            data = json.loads(raw)
+
+            if isinstance(data, dict):
+                raw_suffixes = data.get("watch_suffixes")
+                if isinstance(raw_suffixes, list):
+                    parsed_suffixes = set()
+                    for item in raw_suffixes:
+                        s = str(item).strip().lower()
+                        if s == "":
+                            continue
+                        if not s.startswith("."):
+                            s = "." + s
+                        parsed_suffixes.add(s)
+                    if parsed_suffixes:
+                        watch_suffixes = parsed_suffixes
+
+                raw_ignores = data.get("ignore_dir_names")
+                if isinstance(raw_ignores, list):
+                    parsed_ignores = set()
+                    for item in raw_ignores:
+                        name = str(item).strip()
+                        if name == "":
+                            continue
+                        parsed_ignores.add(name)
+                    ignore_dir_names = parsed_ignores
+    except Exception as e:
+        log_error(f"读取监听配置失败，已回退默认配置: {e}")
+
+    WATCH_SUFFIXES = watch_suffixes
+    IGNORE_DIR_NAMES = ignore_dir_names
 
 
 def append_log_file(line: str) -> None:
@@ -187,6 +236,9 @@ def main() -> int:
     restart_count = 0
     print_boundary("自动重启器已启动")
 
+    # 启动时先加载一次监听配置文件。
+    load_watch_config()
+
     last_snapshot = build_snapshot()
     server_proc = start_server()
 
@@ -206,6 +258,8 @@ def main() -> int:
                 continue
 
             time.sleep(1)
+            # 每轮都重读配置：这样只改 JSON 配置就能热生效。
+            load_watch_config()
             current_snapshot = build_snapshot()
             changed_files = find_changed_files(last_snapshot, current_snapshot)
             if not changed_files:

@@ -21,6 +21,10 @@ const undoButtonElement = document.getElementById("undoButton");
 
 // 这行代码拿到历史记录显示区域。
 const historyListElement = document.getElementById("historyList");
+// 这行代码拿到“服务状态”显示区域。
+const serviceStatusElement = document.getElementById("serviceStatus");
+// 记录 SSE 是否已经成功连接过一次（用于判断“重连”）。
+let hasOpenedStateStreamOnce = false;
 
 // 这个函数负责把内存中的数值显示到页面上。
 function render() {
@@ -197,6 +201,19 @@ function startStateEventStream() {
   // EventSource 会一直保持连接，不需要计时器。
   const source = new EventSource("/api/state-events");
 
+  // 第一次连接只做标记；后续如果是“重连成功”，说明后端很可能重启过。
+  // 这时刷新页面，拿到最新的 HTML/JS。
+  source.onopen = function () {
+    serviceStatusElement.textContent = "🟢 Connected";
+
+    if (!hasOpenedStateStreamOnce) {
+      hasOpenedStateStreamOnce = true;
+      return;
+    }
+
+    window.location.reload();
+  };
+
   // 收到名为 state 的事件时，重新读取 data/state.json。
   source.addEventListener("state", function () {
     loadStateFromFile();
@@ -206,6 +223,7 @@ function startStateEventStream() {
   // 连接出错时，浏览器会自动重连。
   // 这里留一个提示，方便排查。
   source.onerror = function () {
+    serviceStatusElement.textContent = "🔴 Disconnected";
     console.log("SSE 连接异常，浏览器将自动重连");
   };
 }
@@ -294,6 +312,9 @@ function setDpFromInput() {
 
   // 这行把计算结果交给统一更新函数。
   applyDp(nextDp);
+
+  // 应用成功后清空输入框，方便下一次输入。
+  dpInputElement.value = "";
 }
 
 // 点击 DP +1 按钮时，执行加 1。
@@ -302,6 +323,17 @@ addDpButtonElement.addEventListener("click", addDp);
 minusDpButtonElement.addEventListener("click", minusDp);
 // 点击设置 DP 按钮时，执行输入框设置逻辑。
 setDpButtonElement.addEventListener("click", setDpFromInput);
+
+// 在 DP 输入框按下 Enter 时，也执行“应用表达式”。
+dpInputElement.addEventListener("keydown", function (event) {
+  if (event.key !== "Enter") {
+    return;
+  }
+
+  // 阻止默认行为，避免出现意外提交或提示音。
+  event.preventDefault();
+  setDpFromInput();
+});
 
 // 点击撤销按钮时，请求后端撤销。
 undoButtonElement.addEventListener("click", undoLastChange);
@@ -317,9 +349,12 @@ const notifyButtonElement = document.getElementById("notifyButton");
 notifyButtonElement.addEventListener("click", function () {
   // 这里不写通知细节，只负责调用。
   if (typeof window.sendSystemNotification !== "function") {
-    alert("通知模块未加载：请确认 notify.js 已被引入。");
+    console.log("通知模块未加载：请确认 notify.js 已被引入。");
     return;
   }
 
-  window.sendSystemNotification("ChronOS 通知", "这是一条测试通知。");
+  // 按下按钮后延迟 5 秒再发通知，方便测试“延迟提醒”场景。
+  window.setTimeout(function () {
+    window.sendSystemNotification("ChronOS 通知", "这是一条测试通知（延迟 5 秒）。");
+  }, 5000);
 });
