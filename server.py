@@ -1,4 +1,5 @@
 import json
+import os
 import queue
 import re
 import subprocess
@@ -14,6 +15,13 @@ from chronos_config import (
     DAY_BOUNDARY_MINUTE,
     DAY_BOUNDARY_SECOND,
 )
+
+# 统一 Python 缓存目录到项目根目录下的 __pycache__。
+# 这样所有 .py 产生的缓存都会集中在一起，方便管理。
+PY_CACHE_DIR = Path(__file__).resolve().parent / "__pycache__"
+PY_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+sys.pycache_prefix = str(PY_CACHE_DIR)
+os.environ["PYTHONPYCACHEPREFIX"] = str(PY_CACHE_DIR)
 
 
 # 这个路径指向前端目录。
@@ -39,6 +47,11 @@ STATE_IO_LOCK = threading.Lock()
 
 # 这些异常通常表示“客户端断开了连接”，属于正常情况。
 DISCONNECT_ERRORS = (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)
+
+# /api/service-status 的日志节流，避免刷屏。
+SERVICE_STATUS_LOG_INTERVAL_SECONDS = 60
+LAST_SERVICE_STATUS_LOG_TS = 0
+LAST_SERVICE_STATUS_LOG_LOCK = threading.Lock()
 
 # 爬虫运行状态文件（爬虫脚本读写）。
 CRAWLER_STATE_FILE = DATA_DIR / "crawler_state.json"
@@ -73,6 +86,12 @@ MANAGED_CHILD_LOCK = threading.Lock()
 
 # 子进程清单（运行时从配置文件加载）。
 MANAGED_CHILD_SPECS = []
+
+# 子进程重启风暴保护：短时间内连续失败时，暂停该子进程自动重启。
+MANAGED_CHILD_RESTART_GUARD_WINDOW_SECONDS = 30
+MANAGED_CHILD_RESTART_GUARD_MAX_COUNT = 5
+MANAGED_CHILD_RESTART_TIMES = {}
+MANAGED_CHILD_RESTART_DISABLED = set()
 
 
 def ensure_utf8_stdio() -> None:
@@ -232,6 +251,9 @@ def managed_child_supervisor_loop() -> None:
                 if name == "" or not auto_restart:
                     continue
 
+                if name in MANAGED_CHILD_RESTART_DISABLED:
+                    continue
+
                 with MANAGED_CHILD_LOCK:
                     proc = MANAGED_CHILD_PROCESSES.get(name)
 
@@ -241,6 +263,21 @@ def managed_child_supervisor_loop() -> None:
 
                 code = proc.poll()
                 if code is None:
+                    continue
+
+                now_ts = int(time.time())
+                times = MANAGED_CHILD_RESTART_TIMES.get(name, [])
+                window_start = now_ts - MANAGED_CHILD_RESTART_GUARD_WINDOW_SECONDS
+                times = [t for t in times if int(t) >= window_start]
+                times.append(now_ts)
+                MANAGED_CHILD_RESTART_TIMES[name] = times
+
+                if len(times) > MANAGED_CHILD_RESTART_GUARD_MAX_COUNT:
+                    MANAGED_CHILD_RESTART_DISABLED.add(name)
+                    log_error(
+                        f"主调度器：子进程 {name} 在短时间内连续失败，已暂停自动重启"
+                        f"（窗口={MANAGED_CHILD_RESTART_GUARD_WINDOW_SECONDS}s，次数={len(times)}）"
+                    )
                     continue
 
                 log_error(f"主调度器：子进程退出 {name} (code={code})，准备重启")
@@ -1128,6 +1165,18 @@ class SaveDpHandler(BaseHTTPRequestHandler):
             detail = format % args
         except Exception:
             detail = format
+
+        # service-status 被前端频繁轮询时，做节流，避免刷屏。
+        if "GET /api/service-status" in str(detail):
+            now_ts = int(time.time())
+            with LAST_SERVICE_STATUS_LOG_LOCK:
+                global LAST_SERVICE_STATUS_LOG_TS
+                if (
+                    now_ts - int(LAST_SERVICE_STATUS_LOG_TS)
+                    < SERVICE_STATUS_LOG_INTERVAL_SECONDS
+                ):
+                    return
+                LAST_SERVICE_STATUS_LOG_TS = now_ts
 
         now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         client = self.address_string()

@@ -1,5 +1,6 @@
 import csv
 import json
+import sys
 import threading
 import time
 from datetime import datetime
@@ -11,6 +12,15 @@ import wmi
 
 # 项目根目录（ChronOS）
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+# 把项目根目录加入模块搜索路径，保证可以 import src.*
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from src.state.state_manager import calculate_cycle_run_cost
+from src.state.state_manager import get_cycle_window
+from src.state.state_manager import settle_single_run_cost
+
 DATA_DIR = PROJECT_ROOT / "data"
 
 # 数据文件：只保存监控结果（不保存规则）。
@@ -22,6 +32,15 @@ PROCESS_WATCH_RULES_FILE = PROJECT_ROOT / "config" / "process_watch_rules.json"
 # 事件流水和导出文件（都属于数据产物）。
 PROCESS_WATCH_EVENTS_FILE = DATA_DIR / "process_watch_events.jsonl"
 PROCESS_WATCH_EXPORT_CSV = DATA_DIR / "process_watch_export.csv"
+
+# 当前运行会话快照（给外部程序读取）。
+PROCESS_WATCH_ACTIVE_FILE = DATA_DIR / "process_watch_active.json"
+
+# 每分钟写一次“预估扣除 DP”（只预估，不改 DP）。
+PROCESS_WATCH_PENDING_DP_FILE = DATA_DIR / "process_watch_pending_dp.json"
+
+# 规则配置：DP 基础值
+DEFAULT_BASE_DP_PER_MINUTE = 1
 
 
 # 内存里的运行会话：
@@ -178,7 +197,37 @@ def ensure_summary_item(summary: dict, process_name: str) -> None:
             "last_stop_ts": 0,
             "last_stop_text": "",
             "last_event": "",
+            "cycle_key": "",
+            "cycle_run_index": 0,
+            "cycle_run_minutes": [],
+            "cycle_total_cost": 0,
         }
+
+
+def ensure_summary_item_cycle_fields(item: dict) -> None:
+    # 兼容旧数据：补齐周期统计字段。
+    if "cycle_key" not in item:
+        item["cycle_key"] = ""
+    if "cycle_run_index" not in item:
+        item["cycle_run_index"] = 0
+    if "cycle_run_minutes" not in item or not isinstance(
+        item.get("cycle_run_minutes"), list
+    ):
+        item["cycle_run_minutes"] = []
+    if "cycle_total_cost" not in item:
+        item["cycle_total_cost"] = 0
+
+
+def rollover_cycle_if_needed(item: dict, now_ts: int) -> None:
+    # 到新周期时，重置“同周期运行次数/分钟列表/周期成本”。
+    ensure_summary_item_cycle_fields(item)
+    current_cycle = get_cycle_window(now_ts)
+    current_key = str(current_cycle.get("cycle_key", ""))
+    if str(item.get("cycle_key", "")) != current_key:
+        item["cycle_key"] = current_key
+        item["cycle_run_index"] = 0
+        item["cycle_run_minutes"] = []
+        item["cycle_total_cost"] = 0
 
 
 def append_event_line(event: dict) -> None:
@@ -186,6 +235,45 @@ def append_event_line(event: dict) -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     with PROCESS_WATCH_EVENTS_FILE.open("a", encoding="utf-8", newline="\n") as f:
         f.write(json.dumps(event, ensure_ascii=False) + "\n")
+
+
+def write_active_sessions_snapshot() -> None:
+    # 把当前活跃会话写入 data/process_watch_active.json。
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    with ACTIVE_SESSIONS_LOCK:
+        snapshot = {}
+        for name, items in ACTIVE_SESSIONS.items():
+            if not isinstance(items, dict):
+                continue
+            cleaned = {}
+            for pid, start_ts in items.items():
+                try:
+                    cleaned[int(pid)] = int(start_ts)
+                except Exception:
+                    continue
+            if len(cleaned) > 0:
+                snapshot[name] = cleaned
+
+    payload = {
+        "updated_ts": int(time.time()),
+        "updated_text": now_text(),
+        "active": snapshot,
+    }
+    PROCESS_WATCH_ACTIVE_FILE.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def calc_running_minutes(start_ts: int, end_ts: int) -> int:
+    # 把秒数向上取整到分钟
+    if end_ts <= start_ts:
+        return 0
+    seconds = end_ts - start_ts
+    minutes = int(seconds / 60)
+    if seconds % 60 != 0:
+        minutes = minutes + 1
+    return minutes
 
 
 def export_summary_to_csv(state: dict) -> None:
@@ -209,12 +297,16 @@ def export_summary_to_csv(state: dict) -> None:
                 "last_start_text",
                 "last_stop_text",
                 "last_event",
+                "cycle_key",
+                "cycle_run_index",
+                "cycle_total_cost",
             ]
         )
 
         names = sorted(summary.keys())
         for name in names:
             item = summary.get(name, {})
+            ensure_summary_item_cycle_fields(item)
             total_seconds = int(item.get("total_seconds", 0) or 0)
             writer.writerow(
                 [
@@ -228,8 +320,84 @@ def export_summary_to_csv(state: dict) -> None:
                     str(item.get("last_start_text", "")),
                     str(item.get("last_stop_text", "")),
                     str(item.get("last_event", "")),
+                    str(item.get("cycle_key", "")),
+                    int(item.get("cycle_run_index", 0) or 0),
+                    int(item.get("cycle_total_cost", 0) or 0),
                 ]
             )
+
+
+def write_pending_dp_snapshot() -> None:
+    # 每分钟生成一次“预估扣除 DP”快照（不修改 state.json）。
+    state = load_watch_state()
+    summary = state.get("summary", {})
+    if not isinstance(summary, dict):
+        summary = {}
+
+    now_ts = int(time.time())
+    now_text_value = now_text()
+    payload_items = []
+    watch_list = load_watch_rules()
+
+    for process_name in sorted(summary.keys()):
+        if process_name not in watch_list:
+            continue
+
+        item = summary.get(process_name, {})
+        ensure_summary_item_cycle_fields(item)
+        rollover_cycle_if_needed(item, now_ts)
+
+        run_index = int(item.get("cycle_run_index", 0) or 0) + 1
+        active_minutes_list = []
+
+        with ACTIVE_SESSIONS_LOCK:
+            active_map = ACTIVE_SESSIONS.get(process_name, {})
+            if not isinstance(active_map, dict):
+                active_map = {}
+            for _, start_ts in active_map.items():
+                try:
+                    m = calc_running_minutes(int(start_ts), int(now_ts))
+                except Exception:
+                    m = 0
+                if m > 0:
+                    active_minutes_list.append(int(m))
+
+        if len(active_minutes_list) == 0:
+            continue
+
+        predicted_runs = list(item.get("cycle_run_minutes", []))
+        for m in active_minutes_list:
+            predicted_runs.append(int(m))
+
+        predicted_cost = calculate_cycle_run_cost(
+            run_minutes_list=predicted_runs,
+            base_dp_per_minute=DEFAULT_BASE_DP_PER_MINUTE,
+            running_at_settlement=False,
+        )
+
+        payload_items.append(
+            {
+                "process_name": process_name,
+                "cycle_key": str(item.get("cycle_key", "")),
+                "next_run_index": int(run_index),
+                "running_instances": len(active_minutes_list),
+                "active_minutes_list": active_minutes_list,
+                "predicted_run_minutes_list": predicted_runs,
+                "predicted_total_cost": int(predicted_cost.get("total_cost", 0) or 0),
+                "predicted_details": predicted_cost.get("details", []),
+            }
+        )
+
+    payload = {
+        "updated_ts": int(now_ts),
+        "updated_text": now_text_value,
+        "cycle": get_cycle_window(now_ts),
+        "items": payload_items,
+    }
+    PROCESS_WATCH_PENDING_DP_FILE.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
 
 
 def handle_start_event(process_name: str, pid: int) -> None:
@@ -259,6 +427,8 @@ def handle_start_event(process_name: str, pid: int) -> None:
         active_count = len(ACTIVE_SESSIONS[process_name])
 
     item = summary[process_name]
+    ensure_summary_item_cycle_fields(item)
+    rollover_cycle_if_needed(item, now_ts)
     item["is_running"] = active_count > 0
     item["active_instance_count"] = active_count
     item["start_count"] = int(item.get("start_count", 0) or 0) + 1
@@ -279,6 +449,7 @@ def handle_start_event(process_name: str, pid: int) -> None:
         "pid": int(pid),
     }
     append_event_line(event)
+    write_active_sessions_snapshot()
     export_summary_to_csv(state)
     log(f"启动: {process_name} pid={pid}")
 
@@ -310,6 +481,8 @@ def handle_stop_event(process_name: str, pid: int) -> None:
         active_count = len(ACTIVE_SESSIONS[process_name])
 
     item = summary[process_name]
+    ensure_summary_item_cycle_fields(item)
+    rollover_cycle_if_needed(item, now_ts)
     total_seconds = int(item.get("total_seconds", 0) or 0) + int(session_seconds)
     item["total_seconds"] = total_seconds
     item["is_running"] = active_count > 0
@@ -333,8 +506,60 @@ def handle_stop_event(process_name: str, pid: int) -> None:
         "session_seconds": int(session_seconds),
     }
     append_event_line(event)
+    write_active_sessions_snapshot()
     export_summary_to_csv(state)
     log(f"结束: {process_name} pid={pid} session_seconds={session_seconds}")
+
+    # 按 Cycle Run Cost Rule 结算 DP（只在 stop 事件后）
+    session_minutes = calc_running_minutes(int(now_ts - session_seconds), int(now_ts))
+    if session_minutes > 0:
+        run_index = int(item.get("cycle_run_index", 0) or 0) + 1
+        settle_single_run_cost(
+            actor="process_watch",
+            run_minutes=int(session_minutes),
+            run_index=int(run_index),
+            base_dp_per_minute=DEFAULT_BASE_DP_PER_MINUTE,
+            running_at_settlement=False,
+            note="进程监控结算",
+            extra_data={
+                "process_name": process_name,
+                "pid": int(pid),
+                "session_seconds": int(session_seconds),
+                "cycle": get_cycle_window(now_ts),
+            },
+        )
+
+        # 更新周期内倍率统计（凌晨 4 点到次日凌晨 4 点）。
+        item["cycle_run_index"] = int(run_index)
+        run_minutes_list = item.get("cycle_run_minutes", [])
+        if not isinstance(run_minutes_list, list):
+            run_minutes_list = []
+        run_minutes_list.append(int(session_minutes))
+        item["cycle_run_minutes"] = run_minutes_list
+
+        total_cost = 0
+        for i in range(len(run_minutes_list)):
+            idx = i + 1
+            minutes = int(run_minutes_list[i])
+            if minutes < 0:
+                minutes = 0
+            total_cost += int(minutes) * int(idx) * int(DEFAULT_BASE_DP_PER_MINUTE)
+        item["cycle_total_cost"] = int(total_cost)
+
+        state["summary"] = summary
+        state["updated_ts"] = now_ts
+        state["updated_text"] = now_text_value
+        save_watch_state(state)
+
+
+def pending_dp_loop() -> None:
+    # 每分钟更新一次预估扣除 DP（只写预估文件）。
+    while True:
+        try:
+            write_pending_dp_snapshot()
+        except Exception as e:
+            log(f"预估扣除 DP 更新失败: {e}")
+        time.sleep(60)
 
 
 def process_start_listener_loop() -> None:
@@ -384,11 +609,15 @@ def main() -> int:
     # 启动时先导出一次当前汇总（即使还没事件，也能看到表头文件）。
     state = load_watch_state()
     export_summary_to_csv(state)
+    write_active_sessions_snapshot()
+    write_pending_dp_snapshot()
 
     t1 = threading.Thread(target=process_start_listener_loop, daemon=True)
     t2 = threading.Thread(target=process_stop_listener_loop, daemon=True)
+    t3 = threading.Thread(target=pending_dp_loop, daemon=True)
     t1.start()
     t2.start()
+    t3.start()
 
     while True:
         # 主线程只保活。

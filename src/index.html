@@ -7,13 +7,9 @@
 </head>
 
 <body>
-  <header>
-    <h1>ChronOS</h1>
-  </header>
 
   <main>
-    <section aria-labelledby="statusTitle">
-      <h2 id="statusTitle">状态区</h2>
+    <section>
 
       <article aria-labelledby="currentValueTitle">
         <h3 id="currentValueTitle">当前数值</h3>
@@ -35,36 +31,45 @@
       </article>
     </section>
 
-    <section aria-labelledby="actionTitle">
-      <h2 id="actionTitle">操作区</h2>
+    <section>
+      <table>
+        <tr>
+          <td>
+            <article aria-labelledby="dpActionTitle">
+              <h3 id="dpActionTitle">修改 DP</h3>
 
-      <article aria-labelledby="dpActionTitle">
-        <h3 id="dpActionTitle">修改 DP</h3>
+              <div>
+                <button id="addDpButton" type="button">DP +1</button>
+                <button id="minusDpButton" type="button">DP -1</button>
+              </div>
 
-        <div>
-          <button id="addDpButton" type="button">DP +1</button>
-          <button id="minusDpButton" type="button">DP -1</button>
-        </div>
+              <div>
+                <label for="dpInput">表达式（例：+10-3）</label>
+                <input id="dpInput" type="text" />
+                <button id="setDpButton" type="button">应用表达式</button>
+              </div>
 
-        <div>
-          <label for="dpInput">表达式（例：+10-3）</label>
-          <input id="dpInput" type="text" />
-          <button id="setDpButton" type="button">应用表达式</button>
-        </div>
+              <div>
+                <button id="undoButton" type="button">撤销（Undo）</button>
+              </div>
+            </article>
 
-        <div>
-          <button id="undoButton" type="button">撤销（Undo）</button>
-        </div>
-      </article>
-
-      <article aria-labelledby="notifyTitle">
-        <h3 id="notifyTitle">通知功能</h3>
-        <button id="notifyButton" type="button">发送一条系统通知（测试）</button>
-      </article>
+            <article aria-labelledby="notifyTitle">
+              <h3 id="notifyTitle">通知功能</h3>
+              <button id="notifyButton" type="button">发送一条系统通知（测试）</button>
+            </article>
+          </td>
+          <td>
+            <fieldset>
+              <legend>右侧预留框</legend>
+              <p>（先放一个空框，后续你决定这里放什么）</p>
+            </fieldset>
+          </td>
+        </tr>
+      </table>
     </section>
 
-    <section aria-labelledby="historyTitle">
-      <h2 id="historyTitle">历史区</h2>
+    <section>
       <h3>历史记录</h3>
       <pre id="historyList">（暂无）</pre>
     </section>

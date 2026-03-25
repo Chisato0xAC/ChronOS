@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -9,8 +10,14 @@ from pathlib import Path
 
 # 项目根目录：ChronOS/
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+# 统一 Python 缓存目录到项目根目录下的 __pycache__。
+# 这样自动重启器本身和它启动的子进程都会集中缓存。
+PY_CACHE_DIR = PROJECT_ROOT / "__pycache__"
+PY_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+sys.pycache_prefix = str(PY_CACHE_DIR)
+os.environ["PYTHONPYCACHEPREFIX"] = str(PY_CACHE_DIR)
 LOG_DIR = PROJECT_ROOT / "logs"
-SERVER_LOG_FILE = LOG_DIR / "server.log"
 WATCH_CONFIG_FILE = PROJECT_ROOT / "config" / "reload_watch.json"
 
 # 默认：这些类型的文件改动后，会触发自动重启。
@@ -34,6 +41,11 @@ DEFAULT_IGNORE_DIR_NAMES = {
 
 # 控制台输出锁：避免多线程同时 print 造成一行被拆开。
 PRINT_LOCK = threading.Lock()
+
+# 重启风暴保护：在短时间内连续失败时自动退出。
+RESTART_GUARD_WINDOW_SECONDS = 30
+RESTART_GUARD_MAX_COUNT = 5
+RESTART_GUARD_SLEEP_SECONDS = 2
 
 # 运行时配置（优先读 config/reload_watch.json，失败时回退默认值）。
 WATCH_SUFFIXES = set(DEFAULT_WATCH_SUFFIXES)
@@ -84,10 +96,17 @@ def load_watch_config() -> None:
     IGNORE_DIR_NAMES = ignore_dir_names
 
 
+def get_daily_log_file() -> Path:
+    # 按天归档：每天一个日志文件。
+    day_text = datetime.now().strftime("%Y-%m-%d")
+    return LOG_DIR / f"server.{day_text}.log"
+
+
 def append_log_file(line: str) -> None:
-    # 统一日志文件：所有输出都追加到 logs/server.log。
+    # 统一日志文件：所有输出都追加到“当天日志”。
     LOG_DIR.mkdir(parents=True, exist_ok=True)
-    with SERVER_LOG_FILE.open("a", encoding="utf-8", newline="\n") as f:
+    log_file = get_daily_log_file()
+    with log_file.open("a", encoding="utf-8", newline="\n") as f:
         f.write(str(line) + "\n")
 
 
@@ -122,6 +141,25 @@ def log(message: str) -> None:
 def log_error(message: str) -> None:
     # 错误输出。
     emit_line(f"[{now_text()}] [ERROR] [RELOADER] {message}", to_stderr=True)
+
+
+def should_abort_restart(restart_times: list, reason: str) -> bool:
+    # 重启风暴保护：如果在短时间内重启过多，就直接退出。
+    now_ts = time.time()
+    window_start = now_ts - RESTART_GUARD_WINDOW_SECONDS
+    filtered = [t for t in restart_times if t >= window_start]
+    filtered.append(now_ts)
+    restart_times[:] = filtered
+
+    if len(restart_times) <= RESTART_GUARD_MAX_COUNT:
+        return False
+
+    log_error(
+        "检测到重启过于频繁，已自动退出（避免刷屏）。"
+        f"原因={reason}，窗口={RESTART_GUARD_WINDOW_SECONDS}s，"
+        f"次数={len(restart_times)}"
+    )
+    return True
 
 
 def forward_stream_lines(stream, to_stderr: bool) -> None:
@@ -241,6 +279,7 @@ def main() -> int:
 
     last_snapshot = build_snapshot()
     server_proc = start_server()
+    restart_times = []
 
     try:
         while True:
@@ -249,8 +288,13 @@ def main() -> int:
                 log_error(
                     f"server.py 已退出，退出码={server_proc.returncode}，准备重启"
                 )
+                if should_abort_restart(restart_times, "服务意外退出"):
+                    stop_server(server_proc)
+                    return 1
+
                 restart_count = restart_count + 1
                 print_boundary(f"重启开始（第 {restart_count} 次，原因：服务意外退出）")
+                time.sleep(RESTART_GUARD_SLEEP_SECONDS)
                 time.sleep(1)
                 server_proc = start_server()
                 print_boundary(f"重启完成（第 {restart_count} 次）")
@@ -267,6 +311,10 @@ def main() -> int:
 
             log(f"检测到文件变化，共 {len(changed_files)} 处")
             log(changed_files[0])
+
+            if should_abort_restart(restart_times, "文件变更触发"):
+                stop_server(server_proc)
+                return 1
 
             restart_count = restart_count + 1
             print_boundary(
