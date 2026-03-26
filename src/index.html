@@ -6,7 +6,7 @@
   <title>ChronOS</title>
 </head>
 
-<body>
+<body scroll="no">
 
   <main>
     <section>
@@ -32,9 +32,9 @@
     </section>
 
     <section>
-      <table>
+      <table width="100%">
         <tr>
-          <td>
+          <td width="70%" valign="top">
             <article aria-labelledby="dpActionTitle">
               <h3 id="dpActionTitle">修改 DP</h3>
 
@@ -59,10 +59,13 @@
               <button id="notifyButton" type="button">发送一条系统通知（测试）</button>
             </article>
           </td>
-          <td>
+          <td width="30%" valign="top">
             <fieldset>
-              <legend>右侧预留框</legend>
-              <p>（先放一个空框，后续你决定这里放什么）</p>
+              <legend>便签（自动保存）</legend>
+              <label for="noteInput">在这里写笔记：</label>
+              <br />
+              <textarea id="noteInput" rows="14" cols="32"></textarea>
+              <p id="noteSaveStatus">（尚未保存）</p>
             </fieldset>
           </td>
         </tr>
@@ -70,7 +73,7 @@
     </section>
 
     <section>
-      <h3>历史记录</h3>
+      <h3>最近记录（单页）</h3>
       <pre id="historyList">（暂无）</pre>
     </section>
   </main>

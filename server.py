@@ -31,6 +31,9 @@ DATA_DIR = Path(__file__).resolve().parent / "data"
 # 这个路径指向项目里的状态文件，用来保存 DP 和 GP。
 STATE_FILE = DATA_DIR / "state.json"
 
+# 这个路径指向便签文件，用来保存右侧便签内容。
+NOTE_FILE = DATA_DIR / "note.json"
+
 # 这个路径指向状态历史记录文件（JSON Lines：一行一条 JSON）。
 # 注意：这里只记录 data/state.json 的变化，不记录爬虫状态。
 STATE_HISTORY_FILE = DATA_DIR / "state_history.jsonl"
@@ -317,6 +320,22 @@ def ensure_state_history_file_exists() -> None:
     if STATE_HISTORY_FILE.exists():
         return
     STATE_HISTORY_FILE.write_text("", encoding="utf-8")
+
+
+def ensure_note_file_exists() -> None:
+    # 如果 data/note.json 不存在，就创建一个空便签文件。
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    if NOTE_FILE.exists():
+        return
+
+    default_note = {
+        "note": "",
+        "updated_ts": 0,
+    }
+    NOTE_FILE.write_text(
+        json.dumps(default_note, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
 
 
 def ensure_managed_children_config_exists() -> None:
@@ -632,6 +651,28 @@ def read_state_file() -> dict:
         except Exception:
             pass
     return {"dp": 0, "gp": 0}
+
+
+def read_note_file() -> dict:
+    # 读取 data/note.json。
+    # 即使文件损坏/缺字段，也返回一个可用结构。
+    ensure_note_file_exists()
+    try:
+        data = json.loads(NOTE_FILE.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            note_text = str(data.get("note", ""))
+            updated_ts = int(data.get("updated_ts", 0) or 0)
+            return {
+                "note": note_text,
+                "updated_ts": updated_ts,
+            }
+    except Exception:
+        pass
+
+    return {
+        "note": "",
+        "updated_ts": 0,
+    }
 
 
 def read_crawler_state_file() -> dict:
@@ -1321,6 +1362,33 @@ class SaveDpHandler(BaseHTTPRequestHandler):
                 self.end_headers()
                 return
 
+        # /api/note：读取右侧便签内容。
+        if request_path == "/api/note":
+            try:
+                with STATE_IO_LOCK:
+                    note_data = read_note_file()
+
+                response_body = json.dumps(
+                    {
+                        "ok": True,
+                        "note": str(note_data.get("note", "")),
+                        "updated_ts": int(note_data.get("updated_ts", 0) or 0),
+                    },
+                    ensure_ascii=False,
+                ).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", str(len(response_body)))
+                self.end_headers()
+                self.wfile.write(response_body)
+                return
+            except Exception as e:
+                log_error(f"读取便签失败: {e}")
+                self.send_response(500)
+                self.end_headers()
+                return
+
         # SSE：前端连接这个接口，等待“state 变化”的通知。
         if request_path == "/api/state-events":
             q = None
@@ -1424,10 +1492,57 @@ class SaveDpHandler(BaseHTTPRequestHandler):
             "/api/undo",
             "/api/trigger-event",
             "/api/calc-cycle-run-cost",
+            "/api/save-note",
         ):
             self.send_response(404)
             self.end_headers()
             return
+
+        # /api/save-note：保存右侧便签内容。
+        if self.path == "/api/save-note":
+            content_length = int(self.headers.get("Content-Length", "0"))
+            request_body = self.rfile.read(content_length)
+
+            try:
+                body_data = json.loads(request_body.decode("utf-8"))
+            except Exception:
+                self.send_response(400)
+                self.end_headers()
+                return
+
+            if not isinstance(body_data, dict):
+                self.send_response(400)
+                self.end_headers()
+                return
+
+            note_text = str(body_data.get("note", ""))
+            now_ts = int(time.time())
+
+            try:
+                with STATE_IO_LOCK:
+                    write_json_atomic(
+                        NOTE_FILE,
+                        {
+                            "note": note_text,
+                            "updated_ts": now_ts,
+                        },
+                    )
+
+                response_body = json.dumps(
+                    {"ok": True, "updated_ts": now_ts},
+                    ensure_ascii=False,
+                ).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(response_body)))
+                self.end_headers()
+                self.wfile.write(response_body)
+                return
+            except Exception as e:
+                log_error(f"保存便签失败: {e}")
+                self.send_response(500)
+                self.end_headers()
+                return
 
         # /api/calc-cycle-run-cost：落地第一步，只提供后端计算接口。
         # 请求示例：
@@ -1851,6 +1966,7 @@ if __name__ == "__main__":
 
     # 启动前，先确保状态文件存在。
     ensure_state_file_exists()
+    ensure_note_file_exists()
     ensure_crawler_state_file_exists()
     ensure_state_history_file_exists()
     ensure_process_watch_file_exists()

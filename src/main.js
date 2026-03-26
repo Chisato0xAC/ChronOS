@@ -23,8 +23,16 @@ const undoButtonElement = document.getElementById("undoButton");
 const historyListElement = document.getElementById("historyList");
 // 这行代码拿到“服务状态”显示区域。
 const serviceStatusElement = document.getElementById("serviceStatus");
+// 这行代码拿到右侧便签输入框。
+const noteInputElement = document.getElementById("noteInput");
+// 这行代码拿到便签保存状态提示。
+const noteSaveStatusElement = document.getElementById("noteSaveStatus");
+// 单页布局下，历史区固定显示最近几条，避免出现翻页。
+const HISTORY_FETCH_LIMIT = 16;
 // 记录 SSE 是否已经成功连接过一次（用于判断“重连”）。
 let hasOpenedStateStreamOnce = false;
+// 这个变量保存便签自动保存的定时器。
+let noteAutoSaveTimer = null;
 
 // 这个函数负责把内存中的数值显示到页面上。
 function render() {
@@ -136,7 +144,7 @@ function renderHistory(historyRecords) {
 // 这个函数从后端读取历史记录。
 async function loadHistoryFromServer() {
   try {
-    const response = await fetch("/api/state-history?limit=50", {
+    const response = await fetch("/api/state-history?limit=" + HISTORY_FETCH_LIMIT, {
       cache: "no-store",
     });
     const result = await response.json();
@@ -146,6 +154,79 @@ async function loadHistoryFromServer() {
     // 读取失败就显示一行提示，不影响 DP/GP 使用。
     historyListElement.textContent = "（历史记录读取失败）";
   }
+}
+
+// 这个函数从后端读取便签内容，并显示到右侧输入框。
+async function loadNoteFromServer() {
+  // 如果页面上没有便签框，就直接结束。
+  if (!noteInputElement || !noteSaveStatusElement) {
+    return;
+  }
+
+  noteSaveStatusElement.textContent = "（正在读取便签...）";
+
+  try {
+    const response = await fetch("/api/note", {
+      cache: "no-store",
+    });
+    const result = await response.json();
+
+    if (!result || result.ok !== true) {
+      noteSaveStatusElement.textContent = "（便签读取失败）";
+      return;
+    }
+
+    noteInputElement.value = String(result.note || "");
+    noteSaveStatusElement.textContent = "（已读取）";
+  } catch (error) {
+    noteSaveStatusElement.textContent = "（便签读取失败）";
+  }
+}
+
+// 这个函数把便签内容保存到后端文件。
+async function saveNoteToServer(noteText) {
+  if (!noteSaveStatusElement) {
+    return;
+  }
+
+  noteSaveStatusElement.textContent = "（保存中...）";
+
+  try {
+    const response = await fetch("/api/save-note", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        note: String(noteText || ""),
+      }),
+    });
+
+    const result = await response.json();
+    if (!response.ok || !result || result.ok !== true) {
+      noteSaveStatusElement.textContent = "（保存失败）";
+      return;
+    }
+
+    noteSaveStatusElement.textContent = "（已自动保存）";
+  } catch (error) {
+    noteSaveStatusElement.textContent = "（保存失败）";
+  }
+}
+
+// 这个函数在输入后稍等一下再保存，避免每个字符都发请求。
+function scheduleNoteAutoSave() {
+  if (!noteInputElement) {
+    return;
+  }
+
+  if (noteAutoSaveTimer !== null) {
+    window.clearTimeout(noteAutoSaveTimer);
+  }
+
+  noteAutoSaveTimer = window.setTimeout(function () {
+    saveNoteToServer(noteInputElement.value);
+  }, 300);
 }
 
 // 这个函数统一处理 DP 更新，保证规则一致。
@@ -290,6 +371,7 @@ async function undoLastChange() {
 // 这行执行读取 JSON 并更新页面的流程。
 loadStateFromFile();
 loadHistoryFromServer();
+loadNoteFromServer();
 startStateEventStream();
 
 // 这个函数把 DP 增加 1，并刷新页面。
@@ -369,6 +451,11 @@ dpInputElement.addEventListener("keydown", function (event) {
 
 // 点击撤销按钮时，请求后端撤销。
 undoButtonElement.addEventListener("click", undoLastChange);
+
+// 输入便签时，自动触发保存。
+if (noteInputElement) {
+  noteInputElement.addEventListener("input", scheduleNoteAutoSave);
+}
 
 // ---------------------------
 // 通知功能（只做“接线”，逻辑在 notify.js）
