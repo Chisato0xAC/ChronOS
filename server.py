@@ -63,6 +63,9 @@ CRAWLER_AUTH_FILE = Path(__file__).resolve().parent / "config" / "bilibili_auth.
 # 自定义扩展规则目录（用户可以在这里放 JSON 规则文件）
 EXT_RULES_DIR = Path(__file__).resolve().parent / "extensions" / "rules"
 
+# 调试模式配置文件（用于模拟写入 state_history）。
+DEBUG_CONFIG_FILE = Path(__file__).resolve().parent / "config" / "debug_mode.json"
+
 # git hooks 模板目录（项目自带）。
 GITHOOKS_TEMPLATES_DIR = Path(__file__).resolve().parent / "tools" / "githooks"
 
@@ -576,6 +579,35 @@ def ensure_git_hooks_installed() -> None:
     except Exception:
         # 安装失败不应影响主服务启动。
         return
+
+
+def ensure_debug_config_file_exists() -> None:
+    # 如果 config/debug_mode.json 不存在，就创建默认配置。
+    config_file = DEBUG_CONFIG_FILE
+    config_file.parent.mkdir(parents=True, exist_ok=True)
+    if config_file.exists():
+        return
+
+    default_config = {
+        "state_history_simulate": False,
+    }
+    config_file.write_text(
+        json.dumps(default_config, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def read_debug_mode_state_history_simulate() -> bool:
+    # 读取“模拟写入 state_history”的调试开关。
+    try:
+        ensure_debug_config_file_exists()
+        raw = DEBUG_CONFIG_FILE.read_text(encoding="utf-8")
+        data = json.loads(raw)
+        if isinstance(data, dict):
+            return bool(data.get("state_history_simulate", False))
+    except Exception:
+        return False
+    return False
 
 
 def write_json_atomic(file_path: Path, obj: dict) -> None:
@@ -1729,6 +1761,45 @@ class SaveDpHandler(BaseHTTPRequestHandler):
                 state = read_state_file()
 
                 old_dp = int(state.get("dp", 0))
+                base_dp_raw = body_data.get("base_dp", None)
+                if base_dp_raw is None:
+                    response_body = json.dumps(
+                        {"ok": False, "reason": "missing_base_dp"}
+                    ).encode("utf-8")
+                    self.send_response(400)
+                    self.send_header("Content-Type", "application/json; charset=utf-8")
+                    self.send_header("Content-Length", str(len(response_body)))
+                    self.end_headers()
+                    self.wfile.write(response_body)
+                    return
+
+                try:
+                    base_dp = int(base_dp_raw)
+                except Exception:
+                    response_body = json.dumps(
+                        {"ok": False, "reason": "invalid_base_dp"}
+                    ).encode("utf-8")
+                    self.send_response(400)
+                    self.send_header("Content-Type", "application/json; charset=utf-8")
+                    self.send_header("Content-Length", str(len(response_body)))
+                    self.end_headers()
+                    self.wfile.write(response_body)
+                    return
+
+                if base_dp != old_dp:
+                    response_body = json.dumps(
+                        {
+                            "ok": False,
+                            "reason": "base_dp_mismatch",
+                            "current_dp": int(old_dp),
+                        }
+                    ).encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json; charset=utf-8")
+                    self.send_header("Content-Length", str(len(response_body)))
+                    self.end_headers()
+                    self.wfile.write(response_body)
+                    return
 
                 # 只有当 dp 真的变化时，才写入 state.json，并记录一条 history。
                 if dp_value != old_dp:
@@ -1811,8 +1882,14 @@ if __name__ == "__main__":
     child_supervisor.start()
 
     # 使用 ThreadingHTTPServer：因为 SSE 连接会长期占用一个请求。
-    server = ChronosThreadingHTTPServer(("0.0.0.0", 8000), SaveDpHandler)
-    log("Server running at http://0.0.0.0:8000")
+    # 生产环境（如 Render）会通过环境变量 PORT 指定端口。
+    port_text = os.getenv("PORT", "8000")
+    try:
+        port = int(port_text)
+    except Exception:
+        port = 8000
+    server = ChronosThreadingHTTPServer(("0.0.0.0", port), SaveDpHandler)
+    log("Server running at http://0.0.0.0:" + str(port))
     try:
         server.serve_forever()
     finally:

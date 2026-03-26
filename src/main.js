@@ -149,10 +149,15 @@ async function loadHistoryFromServer() {
 }
 
 // 这个函数统一处理 DP 更新，保证规则一致。
-function applyDp(nextDp) {
+function applyDp(nextDp, baseDp) {
   let safeDp = Number(nextDp);
 
   if (Number.isNaN(safeDp)) {
+    return;
+  }
+
+  const safeBaseDp = Number(baseDp);
+  if (Number.isNaN(safeBaseDp)) {
     return;
   }
 
@@ -162,7 +167,7 @@ function applyDp(nextDp) {
 
   currentDp = Math.floor(safeDp);
   render();
-  saveDpToFile();
+  saveDpToFile(Math.floor(safeDp), Math.floor(safeBaseDp));
 }
 
 // 这个函数负责从项目里的 JSON 文件读取 DP 和 GP。
@@ -229,17 +234,37 @@ function startStateEventStream() {
 }
 
 // 这个函数把当前 DP 发给后端接口，后端会写入 state.json。
-async function saveDpToFile() {
+async function saveDpToFile(targetDp, baseDp) {
   try {
-    await fetch("/api/save-dp", {
+    const response = await fetch("/api/save-dp", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        dp: currentDp,
+        dp: Number(targetDp),
+        base_dp: Number(baseDp),
       }),
     });
+
+    if (!response.ok) {
+      // 后端拒绝保存时，重新拉取最新状态。
+      await loadStateFromFile();
+      await loadHistoryFromServer();
+      return;
+    }
+
+    try {
+      const result = await response.json();
+      if (!result || result.ok !== true) {
+        await loadStateFromFile();
+        await loadHistoryFromServer();
+      }
+    } catch (error) {
+      // JSON 解析失败时也刷新一次，避免 UI 停留在旧值。
+      await loadStateFromFile();
+      await loadHistoryFromServer();
+    }
   } catch (error) {
     // 保存失败时，只在控制台提示，不打断页面使用。
     console.error("保存 DP 失败", error);
@@ -269,16 +294,16 @@ startStateEventStream();
 
 // 这个函数把 DP 增加 1，并刷新页面。
 function addDp() {
-  applyDp(currentDp + 1);
+  applyDp(currentDp + 1, currentDp);
 }
 
 // 这个函数把 DP 减少 1，但不会小于 0，然后刷新页面。
 function minusDp() {
-  applyDp(currentDp - 1);
+  applyDp(currentDp - 1, currentDp);
 }
 
 // 这个函数读取表达式，在当前 DP 的基础上做增减。
-function setDpFromInput() {
+async function setDpFromInput() {
   // 这行拿到输入框里的原始文本。
   const rawExpression = dpInputElement.value;
   // 这行去掉表达式里的空格，避免空格影响解析。
@@ -302,6 +327,13 @@ function setDpFromInput() {
     return;
   }
 
+  // 在计算前先读取最新的 DP，避免用旧值导致偏差。
+  try {
+    await loadStateFromFile();
+  } catch (error) {
+    // 读取失败时就继续使用当前内存里的数值。
+  }
+
   // 这行先从当前 DP 开始计算。
   let nextDp = currentDp;
 
@@ -311,7 +343,7 @@ function setDpFromInput() {
   }
 
   // 这行把计算结果交给统一更新函数。
-  applyDp(nextDp);
+  applyDp(nextDp, currentDp);
 
   // 应用成功后清空输入框，方便下一次输入。
   dpInputElement.value = "";
