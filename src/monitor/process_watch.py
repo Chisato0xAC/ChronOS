@@ -1,5 +1,6 @@
 import csv
 import json
+import subprocess
 import sys
 import threading
 import time
@@ -48,6 +49,10 @@ DEFAULT_BASE_DP_PER_MINUTE = 1
 ACTIVE_SESSIONS = {}
 ACTIVE_SESSIONS_LOCK = threading.Lock()
 
+# 事件采集模式：默认用 WMI；出现配额冲突时自动切换为轮询。
+EVENT_CAPTURE_MODE = "wmi"
+EVENT_CAPTURE_MODE_LOCK = threading.Lock()
+
 
 def now_text() -> str:
     # 统一时间显示格式。
@@ -57,6 +62,102 @@ def now_text() -> str:
 def log(message: str) -> None:
     # 控制台日志：给使用者看当前状态。
     print(f"[{now_text()}] [PROCESS_WATCH] {message}", flush=True)
+
+
+def is_wmi_quota_conflict_error(error: Exception) -> bool:
+    # 判断是否是 WMI 常见的“配额冲突”异常。
+    text = str(error)
+    if "配额冲突" in text:
+        return True
+    if "-2147217300" in text:
+        return True
+    return False
+
+
+def set_event_capture_mode_polling(reason: str) -> None:
+    # 切到轮询模式（只切一次，避免重复刷日志）。
+    global EVENT_CAPTURE_MODE
+    with EVENT_CAPTURE_MODE_LOCK:
+        if EVENT_CAPTURE_MODE == "polling":
+            return
+        EVENT_CAPTURE_MODE = "polling"
+    log("WMI 监听不可用，已切换为轮询模式: " + str(reason))
+
+
+def is_polling_mode() -> bool:
+    # 读取当前采集模式。
+    with EVENT_CAPTURE_MODE_LOCK:
+        return EVENT_CAPTURE_MODE == "polling"
+
+
+def list_running_watch_processes() -> dict:
+    # 读取当前系统进程快照（只保留监控名单里的进程）。
+    watch_list = load_watch_rules()
+    watch_set = set(watch_list)
+    if len(watch_set) == 0:
+        return {}
+
+    result = {}
+    try:
+        completed = subprocess.run(
+            ["tasklist", "/FO", "CSV", "/NH"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+        if completed.returncode != 0:
+            return {}
+
+        rows = completed.stdout.splitlines()
+        reader = csv.reader(rows)
+        for row in reader:
+            # tasklist CSV 一行通常是：映像名,PID,会话名,会话#,内存使用
+            if not isinstance(row, list) or len(row) < 2:
+                continue
+
+            process_name = str(row[0] or "").strip().lower()
+            if process_name not in watch_set:
+                continue
+
+            pid_text = str(row[1] or "").strip().replace(",", "")
+            try:
+                pid = int(pid_text)
+            except Exception:
+                continue
+
+            if pid <= 0:
+                continue
+
+            if process_name not in result:
+                result[process_name] = set()
+            result[process_name].add(pid)
+    except Exception:
+        return {}
+
+    return result
+
+
+def seed_active_sessions_from_snapshot(snapshot: dict) -> None:
+    # 轮询模式首次启动时，把“当前已在运行”的进程写入内存会话。
+    now_ts = int(time.time())
+    changed = False
+    with ACTIVE_SESSIONS_LOCK:
+        for process_name, pid_set in snapshot.items():
+            if not isinstance(pid_set, set):
+                continue
+
+            if process_name not in ACTIVE_SESSIONS:
+                ACTIVE_SESSIONS[process_name] = {}
+
+            for pid in pid_set:
+                if int(pid) not in ACTIVE_SESSIONS[process_name]:
+                    ACTIVE_SESSIONS[process_name][int(pid)] = now_ts
+                    changed = True
+
+    if changed:
+        write_active_sessions_snapshot()
 
 
 def ensure_process_watch_state_file_exists() -> None:
@@ -562,42 +663,103 @@ def pending_dp_loop() -> None:
         time.sleep(60)
 
 
+def polling_listener_loop() -> None:
+    # 轮询模式：每 5 秒比较一次进程快照，补发 start/stop 事件。
+    # 说明：这是 WMI 不可用时的降级方案，目标是“功能可用，不再刷异常日志”。
+    poll_interval_seconds = 5
+    previous_snapshot = list_running_watch_processes()
+    seed_active_sessions_from_snapshot(previous_snapshot)
+    log("轮询模式已启动（每 5 秒扫描一次）")
+
+    while True:
+        try:
+            current_snapshot = list_running_watch_processes()
+            names = set(previous_snapshot.keys()) | set(current_snapshot.keys())
+
+            for process_name in names:
+                previous_pids = previous_snapshot.get(process_name, set())
+                current_pids = current_snapshot.get(process_name, set())
+
+                started = current_pids - previous_pids
+                stopped = previous_pids - current_pids
+
+                for pid in started:
+                    handle_start_event(process_name, int(pid))
+
+                for pid in stopped:
+                    handle_stop_event(process_name, int(pid))
+
+            previous_snapshot = current_snapshot
+        except Exception as e:
+            log(f"轮询监听异常（将继续重试）: {e}")
+
+        time.sleep(poll_interval_seconds)
+
+
 def process_start_listener_loop() -> None:
     # 事件驱动：监听“进程启动”。
     # WMI 在子线程里使用前，需要先初始化 COM。
-    pythoncom.CoInitialize()
-    try:
-        c = wmi.WMI()
-        watcher = c.Win32_Process.watch_for("creation")
+    while True:
+        if is_polling_mode():
+            time.sleep(1)
+            continue
 
-        while True:
-            p = watcher()
-            name = str(getattr(p, "Name", "") or "").strip().lower()
-            pid = int(getattr(p, "ProcessId", 0) or 0)
-            if name == "" or pid <= 0:
-                continue
-            handle_start_event(name, pid)
-    finally:
-        pythoncom.CoUninitialize()
+        pythoncom.CoInitialize()
+        try:
+            c = wmi.WMI()
+            watcher = c.Win32_Process.watch_for("creation")
+
+            while True:
+                if is_polling_mode():
+                    break
+
+                p = watcher()
+                name = str(getattr(p, "Name", "") or "").strip().lower()
+                pid = int(getattr(p, "ProcessId", 0) or 0)
+                if name == "" or pid <= 0:
+                    continue
+                handle_start_event(name, pid)
+        except Exception as e:
+            if is_wmi_quota_conflict_error(e):
+                set_event_capture_mode_polling(str(e))
+            else:
+                log(f"启动监听异常，3 秒后重试: {e}")
+                time.sleep(3)
+        finally:
+            pythoncom.CoUninitialize()
 
 
 def process_stop_listener_loop() -> None:
     # 事件驱动：监听“进程结束”。
-    # WMI 在子线程里使用前，需要先初始化 COM。
-    pythoncom.CoInitialize()
-    try:
-        c = wmi.WMI()
-        watcher = c.Win32_Process.watch_for("deletion")
+    # 出现配额冲突时会切换到轮询模式，不再持续刷异常。
+    while True:
+        if is_polling_mode():
+            time.sleep(1)
+            continue
 
-        while True:
-            p = watcher()
-            name = str(getattr(p, "Name", "") or "").strip().lower()
-            pid = int(getattr(p, "ProcessId", 0) or 0)
-            if name == "" or pid <= 0:
-                continue
-            handle_stop_event(name, pid)
-    finally:
-        pythoncom.CoUninitialize()
+        pythoncom.CoInitialize()
+        try:
+            c = wmi.WMI()
+            watcher = c.Win32_Process.watch_for("deletion")
+
+            while True:
+                if is_polling_mode():
+                    break
+
+                p = watcher()
+                name = str(getattr(p, "Name", "") or "").strip().lower()
+                pid = int(getattr(p, "ProcessId", 0) or 0)
+                if name == "" or pid <= 0:
+                    continue
+                handle_stop_event(name, pid)
+        except Exception as e:
+            if is_wmi_quota_conflict_error(e):
+                set_event_capture_mode_polling(str(e))
+            else:
+                log(f"结束监听异常，3 秒后重试: {e}")
+                time.sleep(3)
+        finally:
+            pythoncom.CoUninitialize()
 
 
 def main() -> int:
@@ -615,9 +777,11 @@ def main() -> int:
     t1 = threading.Thread(target=process_start_listener_loop, daemon=True)
     t2 = threading.Thread(target=process_stop_listener_loop, daemon=True)
     t3 = threading.Thread(target=pending_dp_loop, daemon=True)
+    t4 = threading.Thread(target=polling_listener_loop, daemon=True)
     t1.start()
     t2.start()
     t3.start()
+    t4.start()
 
     while True:
         # 主线程只保活。
