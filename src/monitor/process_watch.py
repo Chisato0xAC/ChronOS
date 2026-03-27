@@ -52,6 +52,9 @@ ACTIVE_SESSIONS_LOCK = threading.Lock()
 # 事件采集模式：默认用 WMI；出现配额冲突时自动切换为轮询。
 EVENT_CAPTURE_MODE = "wmi"
 EVENT_CAPTURE_MODE_LOCK = threading.Lock()
+# 轮询线程启用开关：只有切到轮询模式时才会启动。
+POLLING_THREAD_ENABLED = False
+POLLING_THREAD_ENABLED_LOCK = threading.Lock()
 
 
 def now_text() -> str:
@@ -74,6 +77,15 @@ def is_wmi_quota_conflict_error(error: Exception) -> bool:
     return False
 
 
+def enable_polling_thread() -> None:
+    # 启用轮询线程（只启一次）。
+    global POLLING_THREAD_ENABLED
+    with POLLING_THREAD_ENABLED_LOCK:
+        if POLLING_THREAD_ENABLED:
+            return
+        POLLING_THREAD_ENABLED = True
+
+
 def set_event_capture_mode_polling(reason: str) -> None:
     # 切到轮询模式（只切一次，避免重复刷日志）。
     global EVENT_CAPTURE_MODE
@@ -81,6 +93,7 @@ def set_event_capture_mode_polling(reason: str) -> None:
         if EVENT_CAPTURE_MODE == "polling":
             return
         EVENT_CAPTURE_MODE = "polling"
+    enable_polling_thread()
     log("WMI 监听不可用，已切换为轮询模式: " + str(reason))
 
 
@@ -88,6 +101,12 @@ def is_polling_mode() -> bool:
     # 读取当前采集模式。
     with EVENT_CAPTURE_MODE_LOCK:
         return EVENT_CAPTURE_MODE == "polling"
+
+
+def is_polling_thread_enabled() -> bool:
+    # 轮询线程是否允许启动。
+    with POLLING_THREAD_ENABLED_LOCK:
+        return POLLING_THREAD_ENABLED
 
 
 def list_running_watch_processes() -> dict:
@@ -666,34 +685,42 @@ def pending_dp_loop() -> None:
 def polling_listener_loop() -> None:
     # 轮询模式：每 5 秒比较一次进程快照，补发 start/stop 事件。
     # 说明：这是 WMI 不可用时的降级方案，目标是“功能可用，不再刷异常日志”。
-    poll_interval_seconds = 5
-    previous_snapshot = list_running_watch_processes()
-    seed_active_sessions_from_snapshot(previous_snapshot)
-    log("轮询模式已启动（每 5 秒扫描一次）")
-
     while True:
-        try:
-            current_snapshot = list_running_watch_processes()
-            names = set(previous_snapshot.keys()) | set(current_snapshot.keys())
+        if not is_polling_thread_enabled():
+            time.sleep(1)
+            continue
 
-            for process_name in names:
-                previous_pids = previous_snapshot.get(process_name, set())
-                current_pids = current_snapshot.get(process_name, set())
+        poll_interval_seconds = 5
+        previous_snapshot = list_running_watch_processes()
+        seed_active_sessions_from_snapshot(previous_snapshot)
+        log("轮询模式已启动（每 5 秒扫描一次）")
 
-                started = current_pids - previous_pids
-                stopped = previous_pids - current_pids
+        while True:
+            if not is_polling_thread_enabled():
+                break
 
-                for pid in started:
-                    handle_start_event(process_name, int(pid))
+            try:
+                current_snapshot = list_running_watch_processes()
+                names = set(previous_snapshot.keys()) | set(current_snapshot.keys())
 
-                for pid in stopped:
-                    handle_stop_event(process_name, int(pid))
+                for process_name in names:
+                    previous_pids = previous_snapshot.get(process_name, set())
+                    current_pids = current_snapshot.get(process_name, set())
 
-            previous_snapshot = current_snapshot
-        except Exception as e:
-            log(f"轮询监听异常（将继续重试）: {e}")
+                    started = current_pids - previous_pids
+                    stopped = previous_pids - current_pids
 
-        time.sleep(poll_interval_seconds)
+                    for pid in started:
+                        handle_start_event(process_name, int(pid))
+
+                    for pid in stopped:
+                        handle_stop_event(process_name, int(pid))
+
+                previous_snapshot = current_snapshot
+            except Exception as e:
+                log(f"轮询监听异常（将继续重试）: {e}")
+
+            time.sleep(poll_interval_seconds)
 
 
 def process_start_listener_loop() -> None:
@@ -777,10 +804,12 @@ def main() -> int:
     t1 = threading.Thread(target=process_start_listener_loop, daemon=True)
     t2 = threading.Thread(target=process_stop_listener_loop, daemon=True)
     t3 = threading.Thread(target=pending_dp_loop, daemon=True)
-    t4 = threading.Thread(target=polling_listener_loop, daemon=True)
     t1.start()
     t2.start()
     t3.start()
+
+    # 轮询线程默认不启动，只有 WMI 失效时才启用。
+    t4 = threading.Thread(target=polling_listener_loop, daemon=True)
     t4.start()
 
     while True:

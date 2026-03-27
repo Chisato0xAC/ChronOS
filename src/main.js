@@ -27,8 +27,10 @@ const serviceStatusElement = document.getElementById("serviceStatus");
 const noteInputElement = document.getElementById("noteInput");
 // 这行代码拿到便签保存状态提示。
 const noteSaveStatusElement = document.getElementById("noteSaveStatus");
+// 这行代码拿到“打开悬浮窗”按钮。
+const openFloatingWindowButtonElement = document.getElementById("openFloatingWindowButton");
 // 单页布局下，历史区固定显示最近几条，避免出现翻页。
-const HISTORY_FETCH_LIMIT = 16;
+const HISTORY_FETCH_LIMIT = 8;
 // 记录 SSE 是否已经成功连接过一次（用于判断“重连”）。
 let hasOpenedStateStreamOnce = false;
 // 这个变量保存便签自动保存的定时器。
@@ -211,6 +213,31 @@ async function saveNoteToServer(noteText) {
     noteSaveStatusElement.textContent = "（已自动保存）";
   } catch (error) {
     noteSaveStatusElement.textContent = "（保存失败）";
+  }
+}
+
+// 这个函数请求后端打开悬浮窗。
+async function openFloatingWindowFromServer() {
+  try {
+    const response = await fetch("/api/open-floating-window", {
+      method: "POST",
+    });
+
+    if (!response.ok) {
+      console.log("打开悬浮窗失败");
+      return;
+    }
+
+    try {
+      const result = await response.json();
+      if (!result || result.ok !== true) {
+        console.log("打开悬浮窗失败", result);
+      }
+    } catch (error) {
+      console.log("打开悬浮窗失败", error);
+    }
+  } catch (error) {
+    console.log("打开悬浮窗失败", error);
   }
 }
 
@@ -455,6 +482,11 @@ undoButtonElement.addEventListener("click", undoLastChange);
 // 输入便签时，自动触发保存。
 if (noteInputElement) {
   noteInputElement.addEventListener("input", scheduleNoteAutoSave);
+}
+
+// 点击“打开悬浮窗”按钮时，请求后端启动悬浮窗。
+if (openFloatingWindowButtonElement) {
+  openFloatingWindowButtonElement.addEventListener("click", openFloatingWindowFromServer);
 }
 
 // ---------------------------

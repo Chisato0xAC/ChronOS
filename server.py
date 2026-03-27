@@ -77,6 +77,15 @@ PROCESS_WATCH_SCRIPT = (
     Path(__file__).resolve().parent / "src" / "monitor" / "process_watch.py"
 )
 
+# 悬浮窗脚本路径（前端按钮触发）。
+FLOATING_WINDOW_SCRIPT = (
+    Path(__file__).resolve().parent / "tools" / "floating_window.py"
+)
+
+# 悬浮窗子进程句柄（避免重复启动）。
+FLOATING_WINDOW_PROCESS = None
+FLOATING_WINDOW_LOCK = threading.Lock()
+
 # 主调度器子进程配置文件。
 MANAGED_CHILDREN_CONFIG_FILE = (
     Path(__file__).resolve().parent / "config" / "managed_children.json"
@@ -220,6 +229,58 @@ def start_managed_children() -> None:
     # 按配置启动全部托管子进程。
     for spec in MANAGED_CHILD_SPECS:
         start_managed_child(spec)
+
+
+def start_floating_window_process() -> bool:
+    # 启动悬浮窗子进程（如果已在运行就不重复启动）。
+    global FLOATING_WINDOW_PROCESS
+
+    if not FLOATING_WINDOW_SCRIPT.exists():
+        return False
+
+    with FLOATING_WINDOW_LOCK:
+        old_proc = FLOATING_WINDOW_PROCESS
+        if old_proc is not None and old_proc.poll() is None:
+            return True
+
+        try:
+            proc = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-X",
+                    "utf8",
+                    "-u",
+                    str(FLOATING_WINDOW_SCRIPT),
+                ],
+                cwd=str(Path(__file__).resolve().parent),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+
+            FLOATING_WINDOW_PROCESS = proc
+
+            source = "CHILD-FLOATING_WINDOW"
+            if proc.stdout is not None:
+                threading.Thread(
+                    target=forward_child_stream_lines,
+                    args=(proc.stdout, source, "INFO"),
+                    daemon=True,
+                ).start()
+            if proc.stderr is not None:
+                threading.Thread(
+                    target=forward_child_stream_lines,
+                    args=(proc.stderr, source, "ERROR"),
+                    daemon=True,
+                ).start()
+
+            log("主调度器：已启动悬浮窗")
+            return True
+        except Exception as e:
+            log_error(f"主调度器：启动悬浮窗失败: {e}")
+            return False
 
 
 def stop_managed_children() -> None:
@@ -1493,6 +1554,7 @@ class SaveDpHandler(BaseHTTPRequestHandler):
             "/api/trigger-event",
             "/api/calc-cycle-run-cost",
             "/api/save-note",
+            "/api/open-floating-window",
         ):
             self.send_response(404)
             self.end_headers()
@@ -1602,6 +1664,17 @@ class SaveDpHandler(BaseHTTPRequestHandler):
             )
 
             response_body = json.dumps(result, ensure_ascii=False).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(response_body)))
+            self.end_headers()
+            self.wfile.write(response_body)
+            return
+
+        # /api/open-floating-window：打开悬浮窗。
+        if self.path == "/api/open-floating-window":
+            ok = start_floating_window_process()
+            response_body = json.dumps({"ok": ok}, ensure_ascii=False).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(response_body)))
