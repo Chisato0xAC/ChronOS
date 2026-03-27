@@ -5,6 +5,8 @@ let currentGp = 0;
 
 // 这行代码拿到页面里显示 DP 的标签。
 const currentDpElement = document.getElementById("currentDp");
+// 这行代码拿到“当前周期 DP 变更”显示标签。
+const currentCycleDpDeltaElement = document.getElementById("currentCycleDpDelta");
 // 这行代码拿到页面里显示 GP 的标签。
 const currentGpElement = document.getElementById("currentGp");
 // 这行代码拿到 DP +1 按钮。
@@ -30,11 +32,96 @@ const noteSaveStatusElement = document.getElementById("noteSaveStatus");
 // 这行代码拿到“打开悬浮窗”按钮。
 const openFloatingWindowButtonElement = document.getElementById("openFloatingWindowButton");
 // 单页布局下，历史区固定显示最近几条，避免出现翻页。
-const HISTORY_FETCH_LIMIT = 8;
+const HISTORY_FETCH_LIMIT = 16;
 // 记录 SSE 是否已经成功连接过一次（用于判断“重连”）。
 let hasOpenedStateStreamOnce = false;
 // 这个变量保存便签自动保存的定时器。
 let noteAutoSaveTimer = null;
+
+// 这个函数返回“当前周期开始时间戳（秒）”。
+function getCurrentCycleStartTsSeconds() {
+  const now = new Date();
+  const cycleStart = new Date(now);
+
+  // 周期从每天 4:00 开始。
+  cycleStart.setHours(4, 0, 0, 0);
+
+  // 如果现在还没到今天 4:00，说明当前周期是从昨天 4:00 开始。
+  if (now.getTime() < cycleStart.getTime()) {
+    cycleStart.setDate(cycleStart.getDate() - 1);
+  }
+
+  return Math.floor(cycleStart.getTime() / 1000);
+}
+
+// 这个函数把“当前周期 DP 变更”显示到 DP 旁边。
+function renderCurrentCycleDpDelta(deltaValue) {
+  if (!currentCycleDpDeltaElement) {
+    return;
+  }
+
+  const delta = Number(deltaValue);
+  if (Number.isNaN(delta)) {
+    currentCycleDpDeltaElement.textContent = "(0)";
+    currentCycleDpDeltaElement.className = "";
+    return;
+  }
+
+  const safeDelta = Math.floor(delta);
+  if (safeDelta > 0) {
+    currentCycleDpDeltaElement.textContent = "(+" + String(safeDelta) + ")";
+    currentCycleDpDeltaElement.className = "dp-plus";
+    return;
+  }
+
+  if (safeDelta < 0) {
+    currentCycleDpDeltaElement.textContent = "(" + String(safeDelta) + ")";
+    currentCycleDpDeltaElement.className = "dp-minus";
+    return;
+  }
+
+  currentCycleDpDeltaElement.textContent = "(0)";
+  currentCycleDpDeltaElement.className = "";
+}
+
+// 这个函数从历史记录计算“当前周期 DP 总变更”。
+function calculateCurrentCycleDpDeltaFromHistory(historyRecords) {
+  if (!Array.isArray(historyRecords) || historyRecords.length === 0) {
+    return 0;
+  }
+
+  const cycleStartTs = getCurrentCycleStartTsSeconds();
+  let totalDelta = 0;
+
+  for (let i = 0; i < historyRecords.length; i = i + 1) {
+    const item = historyRecords[i] || {};
+    const itemTs = Number(item.ts);
+    if (Number.isNaN(itemTs) || itemTs < cycleStartTs) {
+      continue;
+    }
+
+    if (!Array.isArray(item.changes)) {
+      continue;
+    }
+
+    for (let j = 0; j < item.changes.length; j = j + 1) {
+      const ch = item.changes[j] || {};
+      if (String(ch.path || "") !== "dp") {
+        continue;
+      }
+
+      const fromValue = Number(ch.from);
+      const toValue = Number(ch.to);
+      if (Number.isNaN(fromValue) || Number.isNaN(toValue)) {
+        continue;
+      }
+
+      totalDelta += toValue - fromValue;
+    }
+  }
+
+  return Math.floor(totalDelta);
+}
 
 // 这个函数负责把内存中的数值显示到页面上。
 function render() {
@@ -150,11 +237,14 @@ async function loadHistoryFromServer() {
       cache: "no-store",
     });
     const result = await response.json();
+    const items = Array.isArray(result.items) ? result.items : [];
     // 服务端返回的 items 是“最新在上”。
-    renderHistory(result.items);
+    renderHistory(items);
+    renderCurrentCycleDpDelta(calculateCurrentCycleDpDeltaFromHistory(items));
   } catch (error) {
     // 读取失败就显示一行提示，不影响 DP/GP 使用。
     historyListElement.textContent = "（历史记录读取失败）";
+    renderCurrentCycleDpDelta(0);
   }
 }
 
