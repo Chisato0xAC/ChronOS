@@ -60,7 +60,18 @@
 
             <article aria-labelledby="notifyTitle">
               <h3 id="notifyTitle">通知功能</h3>
-              <button id="notifyButton" type="button">发送一条系统通知（测试）</button>
+              <div>
+                <label for="notifyDelayHoursInput">延迟时间（时:分:秒）：</label>
+                <input id="notifyDelayHoursInput" type="number" min="0" max="99" value="0" />
+                <span>:</span>
+                <input id="notifyDelayMinutesInput" type="number" min="0" max="59" value="0" />
+                <span>:</span>
+                <input id="notifyDelaySecondsInput" type="number" min="0" max="59" value="5" />
+              </div>
+              <p id="notifySchedulePreview">将在 --:--:-- 通知</p>
+              <button id="notifyButton" type="button">发布通知任务</button>
+              <p>待触发通知任务：</p>
+              <pre id="notifyTaskList">（暂无）</pre>
             </article>
 
             <article aria-labelledby="historyTitle">

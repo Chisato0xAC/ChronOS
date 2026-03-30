@@ -31,12 +31,26 @@ const noteInputElement = document.getElementById("noteInput");
 const noteSaveStatusElement = document.getElementById("noteSaveStatus");
 // 这行代码拿到“打开悬浮窗”按钮。
 const openFloatingWindowButtonElement = document.getElementById("openFloatingWindowButton");
+// 这行代码拿到“通知延迟秒数”输入框。
+const notifyDelayHoursInputElement = document.getElementById("notifyDelayHoursInput");
+// 这行代码拿到“通知延迟分钟”输入框。
+const notifyDelayMinutesInputElement = document.getElementById("notifyDelayMinutesInput");
+// 这行代码拿到“通知延迟秒数”输入框。
+const notifyDelaySecondsInputElement = document.getElementById("notifyDelaySecondsInput");
+// 这行代码拿到“通知时间预览”标签。
+const notifySchedulePreviewElement = document.getElementById("notifySchedulePreview");
+// 这行代码拿到“通知任务列表”显示区域。
+const notifyTaskListElement = document.getElementById("notifyTaskList");
 // 单页布局下，历史区固定显示最近几条，避免出现翻页。
 const HISTORY_FETCH_LIMIT = 16;
 // 记录 SSE 是否已经成功连接过一次（用于判断“重连”）。
 let hasOpenedStateStreamOnce = false;
 // 这个变量保存便签自动保存的定时器。
 let noteAutoSaveTimer = null;
+// 这个数组保存“待触发”的通知任务（从后端读取）。
+let notifyPendingTasks = [];
+// 这个对象用于标记“正在触发中”的任务，避免重复触发。
+let notifyTaskInFlightMap = {};
 
 // 这个函数返回“当前周期开始时间戳（秒）”。
 function getCurrentCycleStartTsSeconds() {
@@ -586,16 +600,310 @@ if (openFloatingWindowButtonElement) {
 // 这行代码拿到“通知测试”按钮。
 const notifyButtonElement = document.getElementById("notifyButton");
 
+// 这个函数负责把数字补成两位字符串（例如：5 -> 05）。
+function padTwoDigits(value) {
+  const safeValue = Math.floor(Math.max(0, Number(value) || 0));
+  if (safeValue < 10) {
+    return "0" + String(safeValue);
+  }
+  return String(safeValue);
+}
+
+// 这个函数把“总秒数”转成可读文本（例如：01:02:03）。
+function formatDelaySecondsAsHms(totalSeconds) {
+  let safeTotal = Math.floor(Number(totalSeconds) || 0);
+  if (safeTotal < 0) {
+    safeTotal = 0;
+  }
+
+  const hours = Math.floor(safeTotal / 3600);
+  const minutes = Math.floor((safeTotal % 3600) / 60);
+  const seconds = Math.floor(safeTotal % 60);
+
+  return padTwoDigits(hours) + ":" + padTwoDigits(minutes) + ":" + padTwoDigits(seconds);
+}
+
+// 这个函数把时间戳（秒）转成 HH:MM:SS 文本。
+function formatClockByTs(tsSeconds) {
+  const d = new Date(Number(tsSeconds) * 1000);
+  return padTwoDigits(d.getHours()) + ":" + padTwoDigits(d.getMinutes()) + ":" + padTwoDigits(d.getSeconds());
+}
+
+// 这个函数把“分/秒”限制在 0-59，避免输入超出范围。
+function clampMinuteAndSecondInputs() {
+  if (notifyDelayMinutesInputElement) {
+    let m = Number(notifyDelayMinutesInputElement.value);
+    if (Number.isNaN(m) || !Number.isFinite(m)) {
+      m = 0;
+    }
+    m = Math.floor(m);
+    if (m < 0) {
+      m = 0;
+    }
+    if (m > 59) {
+      m = 59;
+    }
+    notifyDelayMinutesInputElement.value = String(m);
+  }
+
+  if (notifyDelaySecondsInputElement) {
+    let s = Number(notifyDelaySecondsInputElement.value);
+    if (Number.isNaN(s) || !Number.isFinite(s)) {
+      s = 0;
+    }
+    s = Math.floor(s);
+    if (s < 0) {
+      s = 0;
+    }
+    if (s > 59) {
+      s = 59;
+    }
+    notifyDelaySecondsInputElement.value = String(s);
+  }
+}
+
+// 这个函数读取“时分秒”输入，并换算成总秒数。
+function getNotifyDelaySecondsFromInputs() {
+  clampMinuteAndSecondInputs();
+
+  let hours = 0;
+  let minutes = 0;
+  let seconds = 5;
+
+  if (notifyDelayHoursInputElement) {
+    const inputHours = Number(notifyDelayHoursInputElement.value);
+    if (!Number.isNaN(inputHours) && Number.isFinite(inputHours) && inputHours >= 0) {
+      hours = Math.floor(inputHours);
+    }
+  }
+
+  if (notifyDelayMinutesInputElement) {
+    const inputMinutes = Number(notifyDelayMinutesInputElement.value);
+    if (!Number.isNaN(inputMinutes) && Number.isFinite(inputMinutes) && inputMinutes >= 0) {
+      minutes = Math.floor(inputMinutes);
+    }
+  }
+
+  if (notifyDelaySecondsInputElement) {
+    const inputSeconds = Number(notifyDelaySecondsInputElement.value);
+    if (!Number.isNaN(inputSeconds) && Number.isFinite(inputSeconds) && inputSeconds >= 0) {
+      seconds = Math.floor(inputSeconds);
+    }
+  }
+
+  return hours * 3600 + minutes * 60 + seconds;
+}
+
+// 这个函数把“预计通知时间”显示出来（例如：将在 14:30:05 通知）。
+function renderNotifySchedulePreview() {
+  if (!notifySchedulePreviewElement) {
+    return;
+  }
+
+  const delaySeconds = getNotifyDelaySecondsFromInputs();
+  const notifyAt = new Date(Date.now() + delaySeconds * 1000);
+
+  const hh = padTwoDigits(notifyAt.getHours());
+  const mm = padTwoDigits(notifyAt.getMinutes());
+  const ss = padTwoDigits(notifyAt.getSeconds());
+
+  notifySchedulePreviewElement.textContent = "将在 " + hh + ":" + mm + ":" + ss + " 通知";
+}
+
+// 这个函数把“待触发任务”列表渲染到页面。
+function renderNotifyTaskList() {
+  if (!notifyTaskListElement) {
+    return;
+  }
+
+  if (!Array.isArray(notifyPendingTasks) || notifyPendingTasks.length === 0) {
+    notifyTaskListElement.textContent = "（暂无）";
+    return;
+  }
+
+  const lines = [];
+  for (let i = 0; i < notifyPendingTasks.length; i = i + 1) {
+    const task = notifyPendingTasks[i] || {};
+    const title = String(task.title || "ChronOS 通知");
+    const body = String(task.body || "");
+    const dueTs = Number(task.due_ts || 0);
+    const dueText = formatClockByTs(dueTs);
+
+    const remainSeconds = Math.max(0, Math.floor(dueTs - Date.now() / 1000));
+    const remainText = formatDelaySecondsAsHms(remainSeconds);
+
+    let oneLine = "- [" + dueText + "] " + title + "（剩余 " + remainText + "）";
+    if (body !== "") {
+      oneLine = oneLine + " " + body;
+    }
+    lines.push(oneLine);
+  }
+
+  notifyTaskListElement.textContent = lines.join("\n");
+}
+
+// 这个函数从后端读取通知任务，并只保留 pending 状态。
+async function loadNotifyTasksFromServer() {
+  try {
+    const response = await fetch("/api/notify-tasks", {
+      cache: "no-store",
+    });
+
+    const result = await response.json();
+    if (!response.ok || !result || result.ok !== true) {
+      return;
+    }
+
+    const items = Array.isArray(result.items) ? result.items : [];
+    const pending = [];
+    for (let i = 0; i < items.length; i = i + 1) {
+      const item = items[i] || {};
+      if (String(item.status || "") !== "pending") {
+        continue;
+      }
+      pending.push(item);
+    }
+
+    // 按到点时间升序，越早到点越靠前。
+    pending.sort(function (a, b) {
+      return Number(a.due_ts || 0) - Number(b.due_ts || 0);
+    });
+
+    notifyPendingTasks = pending;
+    renderNotifyTaskList();
+  } catch (error) {
+    // 忽略读取失败，不打断其他功能。
+  }
+}
+
+// 这个函数把某个任务标记为已完成（写回后端文件）。
+async function markNotifyTaskDone(taskId) {
+  try {
+    await fetch("/api/notify-task-complete", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        id: String(taskId || ""),
+      }),
+    });
+  } catch (error) {
+    // 完成标记失败就先忽略，下轮会再尝试。
+  }
+}
+
+// 这个函数尝试触发一个已到点的通知任务。
+async function triggerNotifyTask(task) {
+  const taskId = String(task.id || "");
+  if (taskId === "") {
+    return;
+  }
+
+  if (notifyTaskInFlightMap[taskId] === true) {
+    return;
+  }
+  notifyTaskInFlightMap[taskId] = true;
+
+  try {
+    const title = String(task.title || "ChronOS 通知");
+    const body = String(task.body || "");
+    const finalBody = body === "" ? "到点了。" : body;
+
+    if (typeof window.sendSystemNotification === "function") {
+      await window.sendSystemNotification(title, finalBody);
+    }
+
+    await markNotifyTaskDone(taskId);
+    await loadNotifyTasksFromServer();
+  } finally {
+    delete notifyTaskInFlightMap[taskId];
+  }
+}
+
+// 这个函数每秒检查一次：凡是到点的 pending 任务，立即触发。
+function tickNotifyTasks() {
+  const nowTs = Math.floor(Date.now() / 1000);
+
+  for (let i = 0; i < notifyPendingTasks.length; i = i + 1) {
+    const task = notifyPendingTasks[i] || {};
+    const dueTs = Number(task.due_ts || 0);
+    if (Number.isNaN(dueTs)) {
+      continue;
+    }
+    if (dueTs > nowTs) {
+      continue;
+    }
+
+    triggerNotifyTask(task);
+  }
+
+  // 同时刷新“到点预览”和“剩余时间”显示，避免静止。
+  renderNotifySchedulePreview();
+  renderNotifyTaskList();
+}
+
+// 这个函数负责发布一个新的通知任务到后端。
+async function createNotifyTaskToServer(delaySeconds) {
+  const safeDelaySeconds = Math.max(0, Math.floor(Number(delaySeconds) || 0));
+
+  try {
+    const response = await fetch("/api/notify-task-create", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        title: "ChronOS 通知",
+        body: "这是你设置的延迟通知（" + String(safeDelaySeconds) + " 秒后）。",
+        delay_seconds: safeDelaySeconds,
+      }),
+    });
+
+    const result = await response.json();
+    if (!response.ok || !result || result.ok !== true) {
+      return;
+    }
+
+    await loadNotifyTasksFromServer();
+  } catch (error) {
+    // 创建失败只记控制台，不打断页面。
+    console.log("创建通知任务失败", error);
+  }
+}
+
+// 输入变化时，实时刷新“预计通知时间”。
+if (notifyDelayHoursInputElement) {
+  notifyDelayHoursInputElement.addEventListener("input", renderNotifySchedulePreview);
+}
+if (notifyDelayMinutesInputElement) {
+  notifyDelayMinutesInputElement.addEventListener("input", renderNotifySchedulePreview);
+}
+if (notifyDelaySecondsInputElement) {
+  notifyDelaySecondsInputElement.addEventListener("input", renderNotifySchedulePreview);
+}
+
+// 页面加载后先渲染一次预览。
+renderNotifySchedulePreview();
+
+// 启动任务列表读取：刷新页面后也能恢复未到点任务。
+loadNotifyTasksFromServer();
+
+// 每秒更新一次，解决“预计通知时间静止”的问题。
+window.setInterval(tickNotifyTasks, 1000);
+
+// 每 15 秒和后端对一次，避免多窗口时列表不同步。
+window.setInterval(loadNotifyTasksFromServer, 15000);
+
 // 点击“通知测试”按钮时，调用通知模块。
-notifyButtonElement.addEventListener("click", function () {
+notifyButtonElement.addEventListener("click", async function () {
   // 这里不写通知细节，只负责调用。
   if (typeof window.sendSystemNotification !== "function") {
     console.log("通知模块未加载：请确认 notify.js 已被引入。");
     return;
   }
 
-  // 按下按钮后延迟 5 秒再发通知，方便测试“延迟提醒”场景。
-  window.setTimeout(function () {
-    window.sendSystemNotification("ChronOS 通知", "这是一条测试通知（延迟 5 秒）。");
-  }, 5000);
+  // 先读输入框里的“时分秒”，并换算成总秒数，然后创建任务。
+  const delaySeconds = getNotifyDelaySecondsFromInputs();
+  await createNotifyTaskToServer(delaySeconds);
 });

@@ -34,6 +34,9 @@ STATE_FILE = DATA_DIR / "state.json"
 # 这个路径指向便签文件，用来保存右侧便签内容。
 NOTE_FILE = DATA_DIR / "note.json"
 
+# 这个路径指向通知任务文件（保存前端发布的延迟通知任务）。
+NOTIFY_TASKS_FILE = DATA_DIR / "notify_tasks.json"
+
 # 这个路径指向状态历史记录文件（JSON Lines：一行一条 JSON）。
 # 注意：这里只记录 data/state.json 的变化，不记录爬虫状态。
 STATE_HISTORY_FILE = DATA_DIR / "state_history.jsonl"
@@ -399,6 +402,22 @@ def ensure_note_file_exists() -> None:
     )
 
 
+def ensure_notify_tasks_file_exists() -> None:
+    # 如果 data/notify_tasks.json 不存在，就创建一个空任务列表文件。
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    if NOTIFY_TASKS_FILE.exists():
+        return
+
+    default_data = {
+        "tasks": [],
+        "updated_ts": 0,
+    }
+    NOTIFY_TASKS_FILE.write_text(
+        json.dumps(default_data, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
 def ensure_managed_children_config_exists() -> None:
     # 确保 config/managed_children.json 存在。
     # 这个文件用于给“主调度器”声明要托管哪些子进程。
@@ -732,6 +751,56 @@ def read_note_file() -> dict:
 
     return {
         "note": "",
+        "updated_ts": 0,
+    }
+
+
+def read_notify_tasks_file() -> dict:
+    # 读取 data/notify_tasks.json。
+    # 即使文件损坏，也返回可用结构。
+    ensure_notify_tasks_file_exists()
+
+    try:
+        data = json.loads(NOTIFY_TASKS_FILE.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            tasks = data.get("tasks", [])
+            if not isinstance(tasks, list):
+                tasks = []
+
+            safe_tasks = []
+            for item in tasks:
+                if not isinstance(item, dict):
+                    continue
+                task_id = str(item.get("id", "")).strip()
+                if task_id == "":
+                    continue
+
+                status = str(item.get("status", "pending")).strip()
+                if status not in ("pending", "done"):
+                    status = "pending"
+
+                safe_tasks.append(
+                    {
+                        "id": task_id,
+                        "title": str(item.get("title", "ChronOS 通知")),
+                        "body": str(item.get("body", "")),
+                        "delay_seconds": int(item.get("delay_seconds", 0) or 0),
+                        "created_ts": int(item.get("created_ts", 0) or 0),
+                        "due_ts": int(item.get("due_ts", 0) or 0),
+                        "status": status,
+                        "completed_ts": int(item.get("completed_ts", 0) or 0),
+                    }
+                )
+
+            return {
+                "tasks": safe_tasks,
+                "updated_ts": int(data.get("updated_ts", 0) or 0),
+            }
+    except Exception:
+        pass
+
+    return {
+        "tasks": [],
         "updated_ts": 0,
     }
 
@@ -1450,6 +1519,37 @@ class SaveDpHandler(BaseHTTPRequestHandler):
                 self.end_headers()
                 return
 
+        # /api/notify-tasks：读取通知任务列表（给前端渲染“待触发任务”）。
+        if request_path == "/api/notify-tasks":
+            try:
+                with STATE_IO_LOCK:
+                    task_data = read_notify_tasks_file()
+
+                items = task_data.get("tasks", [])
+                if not isinstance(items, list):
+                    items = []
+
+                response_body = json.dumps(
+                    {
+                        "ok": True,
+                        "items": items,
+                        "updated_ts": int(task_data.get("updated_ts", 0) or 0),
+                    },
+                    ensure_ascii=False,
+                ).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", str(len(response_body)))
+                self.end_headers()
+                self.wfile.write(response_body)
+                return
+            except Exception as e:
+                log_error(f"读取通知任务失败: {e}")
+                self.send_response(500)
+                self.end_headers()
+                return
+
         # SSE：前端连接这个接口，等待“state 变化”的通知。
         if request_path == "/api/state-events":
             q = None
@@ -1555,6 +1655,8 @@ class SaveDpHandler(BaseHTTPRequestHandler):
             "/api/calc-cycle-run-cost",
             "/api/save-note",
             "/api/open-floating-window",
+            "/api/notify-task-create",
+            "/api/notify-task-complete",
         ):
             self.send_response(404)
             self.end_headers()
@@ -1670,6 +1772,157 @@ class SaveDpHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(response_body)
             return
+
+        # /api/notify-task-create：新增一个延迟通知任务（保存到 data 文件，刷新后不丢失）。
+        if self.path == "/api/notify-task-create":
+            content_length = int(self.headers.get("Content-Length", "0"))
+            request_body = self.rfile.read(content_length)
+
+            try:
+                body_data = json.loads(request_body.decode("utf-8"))
+            except Exception:
+                self.send_response(400)
+                self.end_headers()
+                return
+
+            if not isinstance(body_data, dict):
+                self.send_response(400)
+                self.end_headers()
+                return
+
+            title = str(body_data.get("title", "ChronOS 通知")).strip()
+            message = str(body_data.get("body", "")).strip()
+            try:
+                delay_seconds = int(body_data.get("delay_seconds", 0) or 0)
+            except Exception:
+                delay_seconds = 0
+
+            if title == "":
+                title = "ChronOS 通知"
+            if delay_seconds < 0:
+                delay_seconds = 0
+
+            now_ts = int(time.time())
+            due_ts = now_ts + delay_seconds
+            task_id = (
+                "notify_"
+                + str(now_ts)
+                + "_"
+                + str(int(time.time() * 1000) % 1000)
+                + "_"
+                + str(os.getpid())
+            )
+
+            task_item = {
+                "id": task_id,
+                "title": title,
+                "body": message,
+                "delay_seconds": int(delay_seconds),
+                "created_ts": now_ts,
+                "due_ts": due_ts,
+                "status": "pending",
+                "completed_ts": 0,
+            }
+
+            try:
+                with STATE_IO_LOCK:
+                    data = read_notify_tasks_file()
+                    tasks = data.get("tasks", [])
+                    if not isinstance(tasks, list):
+                        tasks = []
+                    tasks.append(task_item)
+
+                    write_json_atomic(
+                        NOTIFY_TASKS_FILE,
+                        {
+                            "tasks": tasks,
+                            "updated_ts": now_ts,
+                        },
+                    )
+
+                response_body = json.dumps(
+                    {"ok": True, "item": task_item}, ensure_ascii=False
+                ).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(response_body)))
+                self.end_headers()
+                self.wfile.write(response_body)
+                return
+            except Exception as e:
+                log_error(f"创建通知任务失败: {e}")
+                self.send_response(500)
+                self.end_headers()
+                return
+
+        # /api/notify-task-complete：把一个通知任务标记为已完成。
+        if self.path == "/api/notify-task-complete":
+            content_length = int(self.headers.get("Content-Length", "0"))
+            request_body = self.rfile.read(content_length)
+
+            try:
+                body_data = json.loads(request_body.decode("utf-8"))
+            except Exception:
+                self.send_response(400)
+                self.end_headers()
+                return
+
+            if not isinstance(body_data, dict):
+                self.send_response(400)
+                self.end_headers()
+                return
+
+            task_id = str(body_data.get("id", "")).strip()
+            if task_id == "":
+                self.send_response(400)
+                self.end_headers()
+                return
+
+            completed_ts = int(time.time())
+
+            try:
+                updated = False
+                with STATE_IO_LOCK:
+                    data = read_notify_tasks_file()
+                    tasks = data.get("tasks", [])
+                    if not isinstance(tasks, list):
+                        tasks = []
+
+                    for i in range(len(tasks)):
+                        item = tasks[i]
+                        if not isinstance(item, dict):
+                            continue
+                        if str(item.get("id", "")) != task_id:
+                            continue
+                        item["status"] = "done"
+                        item["completed_ts"] = completed_ts
+                        tasks[i] = item
+                        updated = True
+                        break
+
+                    if updated:
+                        write_json_atomic(
+                            NOTIFY_TASKS_FILE,
+                            {
+                                "tasks": tasks,
+                                "updated_ts": completed_ts,
+                            },
+                        )
+
+                response_body = json.dumps(
+                    {"ok": True, "updated": updated}, ensure_ascii=False
+                ).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(response_body)))
+                self.end_headers()
+                self.wfile.write(response_body)
+                return
+            except Exception as e:
+                log_error(f"完成通知任务失败: {e}")
+                self.send_response(500)
+                self.end_headers()
+                return
 
         # /api/open-floating-window：打开悬浮窗。
         if self.path == "/api/open-floating-window":
@@ -2040,6 +2293,7 @@ if __name__ == "__main__":
     # 启动前，先确保状态文件存在。
     ensure_state_file_exists()
     ensure_note_file_exists()
+    ensure_notify_tasks_file_exists()
     ensure_crawler_state_file_exists()
     ensure_state_history_file_exists()
     ensure_process_watch_file_exists()
