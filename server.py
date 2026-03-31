@@ -1717,8 +1717,8 @@ class SaveDpHandler(BaseHTTPRequestHandler):
                 self.end_headers()
                 return
 
-        # SSE：前端连接这个接口，等待“state 变化”的通知。
-        if request_path == "/api/state-events":
+        # SSE：统一事件通道（新路径 /api/events，旧路径 /api/state-events 继续兼容）。
+        if request_path in ("/api/events", "/api/state-events"):
             q = None
             try:
                 self.send_response(200)
@@ -2010,6 +2010,17 @@ class SaveDpHandler(BaseHTTPRequestHandler):
                 response_body = json.dumps(
                     {"ok": True, "item": task_item}, ensure_ascii=False
                 ).encode("utf-8")
+
+                # 通知所有在线前端：通知任务列表有变化（新增）。
+                sse_broadcast(
+                    "notify_tasks",
+                    {
+                        "reason": "created",
+                        "updated_ts": now_ts,
+                        "task_id": task_id,
+                    },
+                )
+
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json; charset=utf-8")
                 self.send_header("Content-Length", str(len(response_body)))
@@ -2079,6 +2090,18 @@ class SaveDpHandler(BaseHTTPRequestHandler):
                 response_body = json.dumps(
                     {"ok": True, "updated": updated}, ensure_ascii=False
                 ).encode("utf-8")
+
+                if updated:
+                    # 通知所有在线前端：通知任务列表有变化（完成）。
+                    sse_broadcast(
+                        "notify_tasks",
+                        {
+                            "reason": "completed",
+                            "updated_ts": completed_ts,
+                            "task_id": task_id,
+                        },
+                    )
+
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json; charset=utf-8")
                 self.send_header("Content-Length", str(len(response_body)))

@@ -53,6 +53,27 @@ let noteAutoSaveTimer = null;
 let notifyPendingTasks = [];
 // 这个对象用于标记“正在触发中”的任务，避免重复触发。
 let notifyTaskInFlightMap = {};
+// 这个变量保存“通知任务轮询”定时器（无任务时会停掉）。
+let notifyTasksPollTimer = null;
+
+// 这个函数按“是否有待触发任务”决定是否轮询后端。
+function syncNotifyTasksPollingByPendingCount() {
+  const hasPendingTasks = Array.isArray(notifyPendingTasks) && notifyPendingTasks.length > 0;
+
+  // 有任务：确保轮询开启（每 15 秒对后端同步一次）。
+  if (hasPendingTasks) {
+    if (notifyTasksPollTimer === null) {
+      notifyTasksPollTimer = window.setInterval(loadNotifyTasksFromServer, 15000);
+    }
+    return;
+  }
+
+  // 无任务：立刻停止轮询，避免持续 GET /api/notify-tasks。
+  if (notifyTasksPollTimer !== null) {
+    window.clearInterval(notifyTasksPollTimer);
+    notifyTasksPollTimer = null;
+  }
+}
 
 // 这个函数返回“当前周期开始时间戳（秒）”。
 function getCurrentCycleStartTsSeconds() {
@@ -496,10 +517,10 @@ async function loadStateFromFile() {
   render();
 }
 
-// 这个函数连接后端的 SSE 接口：只要 state.json 有变化，后端会通知我们。
+// 这个函数连接后端的 SSE 统一事件通道：只要 state.json 有变化，后端会通知我们。
 function startStateEventStream() {
   // EventSource 会一直保持连接，不需要计时器。
-  const source = new EventSource("/api/state-events");
+  const source = new EventSource("/api/events");
 
   // 第一次连接只做标记；后续如果是“重连成功”，说明后端很可能重启过。
   // 这时刷新页面，拿到最新的 HTML/JS。
@@ -519,6 +540,11 @@ function startStateEventStream() {
     loadStateFromFile();
     loadHistoryFromServer();
     loadDailyReportSimpleFromServer();
+  });
+
+  // 收到名为 notify_tasks 的事件时，重新读取通知任务列表。
+  source.addEventListener("notify_tasks", function () {
+    loadNotifyTasksFromServer();
   });
 
   // 连接出错时，浏览器会自动重连。
@@ -855,6 +881,7 @@ async function loadNotifyTasksFromServer() {
     });
 
     notifyPendingTasks = pending;
+    syncNotifyTasksPollingByPendingCount();
     renderNotifyTaskList();
   } catch (error) {
     // 忽略读取失败，不打断其他功能。
@@ -977,8 +1004,12 @@ loadNotifyTasksFromServer();
 // 每秒更新一次，解决“预计通知时间静止”的问题。
 window.setInterval(tickNotifyTasks, 1000);
 
-// 每 15 秒和后端对一次，避免多窗口时列表不同步。
-window.setInterval(loadNotifyTasksFromServer, 15000);
+// 页面回到前台时补拉一次，避免极端情况下错过 SSE 事件。
+document.addEventListener("visibilitychange", function () {
+  if (document.visibilityState === "visible") {
+    loadNotifyTasksFromServer();
+  }
+});
 
 // 点击“通知测试”按钮时，调用通知模块。
 notifyButtonElement.addEventListener("click", async function () {
