@@ -385,6 +385,92 @@ def write_active_sessions_snapshot() -> None:
     )
 
 
+def load_active_sessions_snapshot() -> dict:
+    # 读取上一次写入的活跃会话快照（用于重启后恢复会话开始时间）。
+    if not PROCESS_WATCH_ACTIVE_FILE.exists():
+        return {}
+
+    try:
+        payload = json.loads(PROCESS_WATCH_ACTIVE_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+    if not isinstance(payload, dict):
+        return {}
+
+    raw_active = payload.get("active", {})
+    if not isinstance(raw_active, dict):
+        return {}
+
+    now_ts = int(time.time())
+    restored = {}
+
+    for process_name, pid_map in raw_active.items():
+        name = str(process_name or "").strip().lower()
+        if name == "":
+            continue
+        if not isinstance(pid_map, dict):
+            continue
+
+        cleaned = {}
+        for pid, start_ts in pid_map.items():
+            try:
+                pid_value = int(pid)
+                start_ts_value = int(start_ts)
+            except Exception:
+                continue
+
+            if pid_value <= 0:
+                continue
+            if start_ts_value <= 0:
+                continue
+            if start_ts_value > now_ts:
+                start_ts_value = now_ts
+
+            cleaned[pid_value] = start_ts_value
+
+        if len(cleaned) > 0:
+            restored[name] = cleaned
+
+    return restored
+
+
+def restore_active_sessions_on_startup() -> None:
+    # 服务重启后恢复活跃会话：
+    # 1) 读取上次快照里的开始时间；2) 只保留当前仍在运行的 PID。
+    restored = load_active_sessions_snapshot()
+    running_snapshot = list_running_watch_processes()
+    now_ts = int(time.time())
+
+    recovered_count = 0
+    with ACTIVE_SESSIONS_LOCK:
+        ACTIVE_SESSIONS.clear()
+
+        for process_name, pid_set in running_snapshot.items():
+            if not isinstance(pid_set, set):
+                continue
+            if process_name not in ACTIVE_SESSIONS:
+                ACTIVE_SESSIONS[process_name] = {}
+
+            old_map = restored.get(process_name, {})
+            if not isinstance(old_map, dict):
+                old_map = {}
+
+            for pid in pid_set:
+                pid_value = int(pid)
+                if pid_value <= 0:
+                    continue
+                start_ts = int(old_map.get(pid_value, now_ts) or now_ts)
+                if start_ts <= 0 or start_ts > now_ts:
+                    start_ts = now_ts
+                ACTIVE_SESSIONS[process_name][pid_value] = start_ts
+                recovered_count += 1
+
+    write_active_sessions_snapshot()
+    if recovered_count > 0:
+        log(f"重启恢复活跃会话成功，共 {recovered_count} 个实例")
+
+
 def calc_running_minutes(start_ts: int, end_ts: int) -> int:
     # 把秒数向上取整到分钟
     if end_ts <= start_ts:
@@ -794,11 +880,11 @@ def main() -> int:
     log("进程监控程序已启动（事件驱动）")
     ensure_process_watch_state_file_exists()
     ensure_process_watch_rules_file_exists()
+    restore_active_sessions_on_startup()
 
     # 启动时先导出一次当前汇总（即使还没事件，也能看到表头文件）。
     state = load_watch_state()
     export_summary_to_csv(state)
-    write_active_sessions_snapshot()
     write_pending_dp_snapshot()
 
     t1 = threading.Thread(target=process_start_listener_loop, daemon=True)
