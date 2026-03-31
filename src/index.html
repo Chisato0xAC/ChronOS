@@ -5,8 +5,114 @@
   <meta charset="utf-8" />
   <title>ChronOS</title>
   <style>
-    .dp-plus{color:green}
-    .dp-minus{color:red}
+    body {
+      margin: 12px;
+      background: #f5f4ee;
+      color: #1f2328;
+      font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+    }
+
+    h3 {
+      margin: 0 0 8px 0;
+    }
+
+    section {
+      margin-bottom: 12px;
+    }
+
+    section > article {
+      border: 1px solid #d8d4c8;
+      background: #fffdf7;
+      padding: 10px;
+      margin-bottom: 10px;
+    }
+
+    .main-grid {
+      display: grid;
+      grid-template-columns: 2fr 1fr;
+      gap: 12px;
+      align-items: start;
+    }
+
+    .left-column,
+    .right-column {
+      min-width: 0;
+    }
+
+    .left-column > article,
+    .right-column > article {
+      border: 1px solid #d8d4c8;
+      background: #fffdf7;
+      padding: 10px;
+      margin-bottom: 10px;
+    }
+
+    #serviceStatusCard {
+      position: fixed;
+      top: 6px;
+      right: 8px;
+      margin: 0;
+      padding: 4px 8px;
+      background: #f8f6ed;
+      border: 1px solid #e4dfd1;
+      border-radius: 6px;
+      z-index: 1000;
+    }
+
+    #serviceStatusCard h3 {
+      display: inline-block;
+      font-size: 12px;
+      font-weight: normal;
+      margin: 0 6px 0 0;
+      color: #6b7280;
+    }
+
+    #serviceStatusCard p {
+      display: inline-block;
+      margin: 0;
+      font-size: 12px;
+    }
+
+    pre {
+      margin: 6px 0 0 0;
+      padding: 8px;
+      background: #fbfaf4;
+      border: 1px solid #e8e3d6;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    #historyList {
+      max-height: 300px;
+      overflow-y: auto;
+    }
+
+    input,
+    button,
+    textarea {
+      margin-top: 4px;
+    }
+
+    details {
+      margin-top: 8px;
+      padding: 6px 8px;
+      border: 1px solid #e8e3d6;
+      background: #fbfaf4;
+    }
+
+    summary {
+      cursor: pointer;
+      font-weight: bold;
+    }
+
+    @media (max-width: 900px) {
+      .main-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    .dp-plus { color: green }
+    .dp-minus { color: red }
   </style>
 </head>
 
@@ -14,72 +120,80 @@
 
   <main>
     <section>
-
-      <article aria-labelledby="currentValueTitle">
-        <h3 id="currentValueTitle">当前数值</h3>
-        <table>
-          <tr>
-            <th scope="row">DP</th>
-            <td><span id="currentDp">0</span> <span id="currentCycleDpDelta">(0)</span></td>
-          </tr>
-          <tr>
-            <th scope="row">GP</th>
-            <td id="currentGp">0.00</td>
-          </tr>
-        </table>
-      </article>
-
-      <article aria-labelledby="serviceStatusTitle">
-        <h3 id="serviceStatusTitle">服务状态</h3>
+      <article id="serviceStatusCard" aria-labelledby="serviceStatusTitle">
+        <h3 id="serviceStatusTitle">Status</h3>
         <p id="serviceStatus">正在读取服务状态...</p>
       </article>
     </section>
 
-    <section>
-      <table width="100%">
-        <tr>
-          <td width="70%" valign="top">
-            <article aria-labelledby="dpActionTitle">
-              <h3 id="dpActionTitle">修改 DP</h3>
+    <section class="main-grid">
+      <div class="left-column">
+        <article aria-labelledby="dpActionTitle">
+          <h3 id="dpActionTitle">修改 DP</h3>
 
-              <div>
-                <button id="addDpButton" type="button">DP +1</button>
-                <button id="minusDpButton" type="button">DP -1</button>
-              </div>
+          <div>
+            <button id="addDpButton" type="button">DP +1</button>
+            <button id="minusDpButton" type="button">DP -1</button>
+          </div>
 
-              <div>
-                <label for="dpInput">表达式（例：+10-3）</label>
-                <input id="dpInput" type="text" />
-                <button id="setDpButton" type="button">应用表达式</button>
-              </div>
+          <div>
+            <label for="dpInput">表达式（例：+10-3）</label>
+            <input id="dpInput" type="text" />
+            <button id="setDpButton" type="button">应用表达式</button>
+          </div>
 
-              <div>
-                <button id="undoButton" type="button">撤销（Undo）</button>
-              </div>
-            </article>
+          <div>
+            <button id="undoButton" type="button">撤销（Undo）</button>
+          </div>
+        </article>
 
-            <article aria-labelledby="notifyTitle">
-              <h3 id="notifyTitle">通知功能</h3>
-              <div>
-                <label for="notifyDelayHoursInput">延迟时间（时:分:秒）：</label>
-                <input id="notifyDelayHoursInput" type="number" min="0" max="99" value="0" />
-                <span>:</span>
-                <input id="notifyDelayMinutesInput" type="number" min="0" max="59" value="0" />
-                <span>:</span>
-                <input id="notifyDelaySecondsInput" type="number" min="0" max="59" value="5" />
-              </div>
-              <p id="notifySchedulePreview">将在 --:--:-- 通知</p>
-              <button id="notifyButton" type="button">发布通知任务</button>
-              <p>待触发通知任务：</p>
-              <pre id="notifyTaskList">（暂无）</pre>
-            </article>
+        <article aria-labelledby="historyTitle">
+          <h3 id="historyTitle">历史记录</h3>
+          <pre id="historyList">（暂无）</pre>
+        </article>
+      </div>
 
-            <article aria-labelledby="historyTitle">
-              <h3 id="historyTitle">历史记录</h3>
-              <pre id="historyList">（暂无）</pre>
-            </article>
-          </td>
-          <td width="30%" valign="top">
+      <div class="right-column">
+        <article aria-labelledby="currentValueTitle">
+          <h3 id="currentValueTitle">当前数值</h3>
+          <table>
+            <tr>
+              <th scope="row">DP</th>
+              <td><span id="currentDp">0</span> <span id="currentCycleDpDelta">(0)</span></td>
+            </tr>
+            <tr>
+              <th scope="row">GP</th>
+              <td id="currentGp">0.00</td>
+            </tr>
+          </table>
+        </article>
+
+        <article aria-labelledby="dailyReportSimpleTitle">
+          <h3 id="dailyReportSimpleTitle">今日日报（简略）</h3>
+          <pre id="dailyReportSimple">（正在读取）</pre>
+        </article>
+
+        <article aria-labelledby="notifyTitle">
+          <h3 id="notifyTitle">功能列表</h3>
+
+          <details>
+            <summary>通知</summary>
+            <div>
+              <label for="notifyDelayHoursInput">延迟时间（时:分:秒）：</label>
+              <input id="notifyDelayHoursInput" type="number" min="0" max="99" value="0" />
+              <span>:</span>
+              <input id="notifyDelayMinutesInput" type="number" min="0" max="59" value="0" />
+              <span>:</span>
+              <input id="notifyDelaySecondsInput" type="number" min="0" max="59" value="5" />
+            </div>
+            <p id="notifySchedulePreview">将在 --:--:-- 通知</p>
+            <button id="notifyButton" type="button">发布通知任务</button>
+            <p>待触发通知任务：</p>
+            <pre id="notifyTaskList">（暂无）</pre>
+          </details>
+
+          <details>
+            <summary>便签</summary>
             <fieldset>
               <legend>便签（自动保存）</legend>
               <label for="noteInput">在这里写笔记：</label>
@@ -87,14 +201,14 @@
               <textarea id="noteInput" rows="14" cols="32"></textarea>
               <p id="noteSaveStatus">（尚未保存）</p>
             </fieldset>
+          </details>
 
-            <article aria-labelledby="floatingWindowTitle">
-              <h3 id="floatingWindowTitle">悬浮窗</h3>
-              <button id="openFloatingWindowButton" type="button">打开悬浮窗</button>
-            </article>
-          </td>
-        </tr>
-      </table>
+          <details>
+            <summary>悬浮窗</summary>
+            <button id="openFloatingWindowButton" type="button">打开悬浮窗</button>
+          </details>
+        </article>
+      </div>
     </section>
   </main>
 

@@ -1111,6 +1111,155 @@ def find_latest_undoable_history_record():
     return None
 
 
+def get_day_window_by_boundary_ts(now_ts: int) -> tuple[int, int]:
+    # 按“换日时间（默认 04:00）”计算当前统计窗口：
+    # - day_start_ts: 当前日窗口起点
+    # - day_end_ts:   下一日窗口起点（开区间上界）
+    now_dt = datetime.fromtimestamp(int(now_ts))
+    day_start_dt = now_dt.replace(
+        hour=DAY_BOUNDARY_HOUR,
+        minute=DAY_BOUNDARY_MINUTE,
+        second=DAY_BOUNDARY_SECOND,
+        microsecond=0,
+    )
+
+    if now_dt < day_start_dt:
+        day_start_dt = day_start_dt - timedelta(days=1)
+
+    day_end_dt = day_start_dt + timedelta(days=1)
+    return int(day_start_dt.timestamp()), int(day_end_dt.timestamp())
+
+
+def build_daily_report_simple() -> dict:
+    # 生成“今日日报（简略）”：
+    # - 只统计当前换日窗口内的“仍有效”的状态变更
+    # - undo 记录本身不计入日报
+    now_ts = int(time.time())
+    day_start_ts, day_end_ts = get_day_window_by_boundary_ts(now_ts)
+
+    result = {
+        "ok": True,
+        "report_date": datetime.fromtimestamp(day_start_ts).strftime("%Y-%m-%d"),
+        "day_start_ts": int(day_start_ts),
+        "day_end_ts": int(day_end_ts),
+        "day_start_text": datetime.fromtimestamp(day_start_ts).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        ),
+        "day_end_text": datetime.fromtimestamp(day_end_ts).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        ),
+        "total_events": 0,
+        "dp_change_count": 0,
+        "gp_change_count": 0,
+        "dp_delta_total": 0,
+        "gp_delta_total": 0.0,
+        "latest_change_text": "",
+    }
+
+    if not STATE_HISTORY_FILE.exists():
+        return result
+
+    try:
+        lines = STATE_HISTORY_FILE.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return result
+
+    # 先从最新往前扫，找出“被撤销过”的 ts。
+    undone_ts = set()
+    for i in range(len(lines) - 1, -1, -1):
+        raw = lines[i].strip()
+        if raw == "":
+            continue
+
+        try:
+            record = json.loads(raw)
+        except Exception:
+            continue
+
+        if not isinstance(record, dict):
+            continue
+
+        if str(record.get("type", "")) != "undo":
+            continue
+
+        data = record.get("data")
+        if not isinstance(data, dict):
+            continue
+
+        undo_of_ts = data.get("undo_of_ts")
+        if isinstance(undo_of_ts, int):
+            undone_ts.add(undo_of_ts)
+
+    latest_ts = 0
+
+    # 再按时间正序统计，方便得到“最后一次变更时间”。
+    for i in range(len(lines)):
+        raw = lines[i].strip()
+        if raw == "":
+            continue
+
+        try:
+            record = json.loads(raw)
+        except Exception:
+            continue
+
+        if not isinstance(record, dict):
+            continue
+
+        record_type = str(record.get("type", ""))
+        if record_type == "undo":
+            continue
+
+        ts = record.get("ts")
+        if not isinstance(ts, int):
+            continue
+        if ts < day_start_ts or ts >= day_end_ts:
+            continue
+        if ts in undone_ts:
+            continue
+
+        result["total_events"] = int(result["total_events"]) + 1
+
+        changes = record.get("changes")
+        if not isinstance(changes, list):
+            changes = []
+
+        for j in range(len(changes)):
+            ch = changes[j]
+            if not isinstance(ch, dict):
+                continue
+
+            path = str(ch.get("path", ""))
+            from_value = ch.get("from")
+            to_value = ch.get("to")
+
+            from_number = None
+            to_number = None
+            try:
+                from_number = float(from_value)
+                to_number = float(to_value)
+            except Exception:
+                continue
+
+            if path == "dp":
+                result["dp_change_count"] = int(result["dp_change_count"]) + 1
+                result["dp_delta_total"] = int(result["dp_delta_total"]) + int(
+                    to_number - from_number
+                )
+            elif path == "gp":
+                result["gp_change_count"] = int(result["gp_change_count"]) + 1
+                result["gp_delta_total"] = float(result["gp_delta_total"]) + float(
+                    to_number - from_number
+                )
+
+        if ts >= latest_ts:
+            latest_ts = ts
+            result["latest_change_text"] = str(record.get("text", ""))
+
+    result["gp_delta_total"] = round(float(result["gp_delta_total"]), 2)
+    return result
+
+
 def sse_broadcast(event_name: str, data: dict) -> None:
     # 把一条事件广播给所有在线的 SSE 客户端。
     # SSE 协议格式：
@@ -1488,6 +1637,24 @@ class SaveDpHandler(BaseHTTPRequestHandler):
                 return
             except Exception as e:
                 log_error(f"读取历史记录失败: {e}")
+                self.send_response(500)
+                self.end_headers()
+                return
+
+        # /api/daily-report-simple：返回“今日日报（简略）”。
+        if request_path == "/api/daily-report-simple":
+            try:
+                payload = build_daily_report_simple()
+                response_body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", str(len(response_body)))
+                self.end_headers()
+                self.wfile.write(response_body)
+                return
+            except Exception as e:
+                log_error(f"读取今日日报失败: {e}")
                 self.send_response(500)
                 self.end_headers()
                 return

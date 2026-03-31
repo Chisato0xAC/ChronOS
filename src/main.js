@@ -23,6 +23,8 @@ const undoButtonElement = document.getElementById("undoButton");
 
 // 这行代码拿到历史记录显示区域。
 const historyListElement = document.getElementById("historyList");
+// 这行代码拿到“今日日报（简略）”显示区域。
+const dailyReportSimpleElement = document.getElementById("dailyReportSimple");
 // 这行代码拿到“服务状态”显示区域。
 const serviceStatusElement = document.getElementById("serviceStatus");
 // 这行代码拿到右侧便签输入框。
@@ -244,6 +246,87 @@ function renderHistory(historyRecords) {
   historyListElement.textContent = lines.join("\n");
 }
 
+// 这个函数把“带正负号”的数字格式化为文本（例如：+3、-2、0）。
+function formatSignedNumber(value, fixedDigits) {
+  const n = Number(value);
+  if (Number.isNaN(n) || !Number.isFinite(n)) {
+    return "0";
+  }
+
+  let text = "0";
+  if (typeof fixedDigits === "number") {
+    text = n.toFixed(fixedDigits);
+  } else {
+    text = String(Math.floor(n));
+  }
+
+  if (n > 0) {
+    return "+" + text;
+  }
+  return text;
+}
+
+// 这个函数把“今日日报（简略）”渲染到首页。
+function renderDailyReportSimple(data) {
+  if (!dailyReportSimpleElement) {
+    return;
+  }
+
+  if (!data || data.ok !== true) {
+    dailyReportSimpleElement.textContent = "（日报读取失败）";
+    return;
+  }
+
+  const totalEvents = Math.floor(Number(data.total_events) || 0);
+  const dpChangeCount = Math.floor(Number(data.dp_change_count) || 0);
+  const gpChangeCount = Math.floor(Number(data.gp_change_count) || 0);
+  const dpDeltaTotal = Math.floor(Number(data.dp_delta_total) || 0);
+  const gpDeltaTotal = Number(data.gp_delta_total) || 0;
+  const latestChangeText = String(data.latest_change_text || "").trim();
+  let reportDate = String(data.report_date || "").trim();
+  if (reportDate === "") {
+    const dayStartText = String(data.day_start_text || "").trim();
+    reportDate = dayStartText.slice(0, 10);
+  }
+
+  const lines = [];
+  lines.push("统计日期：" + reportDate);
+  lines.push("有效变更条数：" + String(totalEvents));
+  lines.push("DP 变更次数：" + String(dpChangeCount) + "，合计：" + formatSignedNumber(dpDeltaTotal));
+  lines.push("GP 变更次数：" + String(gpChangeCount) + "，合计：" + formatSignedNumber(gpDeltaTotal, 2));
+
+  if (latestChangeText !== "") {
+    lines.push("最后一次变更：" + latestChangeText);
+  } else {
+    lines.push("最后一次变更：无");
+  }
+
+  dailyReportSimpleElement.textContent = lines.join("\n");
+}
+
+// 这个函数从后端读取“今日日报（简略）”。
+async function loadDailyReportSimpleFromServer() {
+  if (!dailyReportSimpleElement) {
+    return;
+  }
+
+  try {
+    const response = await fetch("/api/daily-report-simple", {
+      cache: "no-store",
+    });
+
+    const result = await response.json();
+    if (!response.ok) {
+      dailyReportSimpleElement.textContent = "（日报读取失败）";
+      return;
+    }
+
+    renderDailyReportSimple(result);
+  } catch (error) {
+    dailyReportSimpleElement.textContent = "（日报读取失败）";
+  }
+}
+
 // 这个函数从后端读取历史记录。
 async function loadHistoryFromServer() {
   try {
@@ -435,6 +518,7 @@ function startStateEventStream() {
   source.addEventListener("state", function () {
     loadStateFromFile();
     loadHistoryFromServer();
+    loadDailyReportSimpleFromServer();
   });
 
   // 连接出错时，浏览器会自动重连。
@@ -502,6 +586,7 @@ async function undoLastChange() {
 // 这行执行读取 JSON 并更新页面的流程。
 loadStateFromFile();
 loadHistoryFromServer();
+loadDailyReportSimpleFromServer();
 loadNoteFromServer();
 startStateEventStream();
 
