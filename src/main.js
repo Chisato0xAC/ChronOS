@@ -43,10 +43,18 @@ const navPositionSelectElement = document.getElementById("navPositionSelect");
 const navBarCardElement = document.getElementById("navBarCard");
 // 这行代码拿到“设置”按钮。
 const taskbarSettingsButtonElement = document.getElementById("taskbarSettingsButton");
+// 这行代码拿到“统计”按钮。
+const taskbarStatsButtonElement = document.getElementById("taskbarStatsButton");
 // 这行代码拿到“设置弹窗”。
 const settingsPanelElement = document.getElementById("settingsPanel");
 // 这行代码拿到“关闭设置弹窗”按钮。
 const closeSettingsPanelButtonElement = document.getElementById("closeSettingsPanelButton");
+// 这行代码拿到“统计弹窗”。
+const statsPanelElement = document.getElementById("statsPanel");
+// 这行代码拿到“统计弹窗内容”。
+const statsPanelContentElement = document.getElementById("statsPanelContent");
+// 这行代码拿到“关闭统计弹窗”按钮。
+const closeStatsPanelButtonElement = document.getElementById("closeStatsPanelButton");
 // 这行代码拿到主内容容器，用于给任务栏让出空间。
 const mainRootElement = document.getElementById("mainRoot");
 // 这行代码拿到“通知延迟秒数”输入框。
@@ -73,6 +81,8 @@ let notifyTaskInFlightMap = {};
 let notifyTasksPollTimer = null;
 // 这个变量保存“每日日报”当前查看的日期偏移：0=今天，-1=昨天。
 let dailyReportDayOffset = 0;
+// 这个变量保存“最近一次日报原始数据”，给统计弹窗复用。
+let latestDailyReportData = null;
 
 // 这个函数把导航栏贴到页面边缘（上/下/左/右，类似开始菜单停靠）。
 function applyNavPosition(positionValue) {
@@ -113,6 +123,20 @@ function setSettingsPanelVisible(visible) {
   }
 
   settingsPanelElement.hidden = true;
+}
+
+// 这个函数负责显示或隐藏“统计弹窗”。
+function setStatsPanelVisible(visible) {
+  if (!statsPanelElement) {
+    return;
+  }
+
+  if (visible) {
+    statsPanelElement.hidden = false;
+    return;
+  }
+
+  statsPanelElement.hidden = true;
 }
 
 // 这个函数根据任务栏当前位置，给主内容设置安全边距。
@@ -425,6 +449,8 @@ function renderDailyReportSimple(data) {
   const gpChangeCount = Math.floor(Number(data.gp_change_count) || 0);
   const dpDeltaTotal = Math.floor(Number(data.dp_delta_total) || 0);
   const gpDeltaTotal = Number(data.gp_delta_total) || 0;
+  const dpMaxGain = Math.floor(Number(data.dp_max_gain) || 0);
+  const dpMaxCost = Math.floor(Number(data.dp_max_cost) || 0);
   let reportDate = String(data.report_date || "").trim();
   if (reportDate === "") {
     const dayStartText = String(data.day_start_text || "").trim();
@@ -438,6 +464,8 @@ function renderDailyReportSimple(data) {
   // 没有变更的项目不显示，只展示当天实际发生变更的条目。
   if (dpChangeCount > 0) {
     lines.push("DP 变更次数：" + String(dpChangeCount) + "，合计：" + formatSignedNumber(dpDeltaTotal));
+    lines.push("单日最大DP获取：+" + String(Math.max(0, dpMaxGain)));
+    lines.push("单日最大DP消耗：-" + String(Math.max(0, dpMaxCost)));
   }
   if (gpChangeCount > 0) {
     lines.push("GP 变更次数：" + String(gpChangeCount) + "，合计：" + formatSignedNumber(gpDeltaTotal, 2));
@@ -448,6 +476,56 @@ function renderDailyReportSimple(data) {
   }
 
   dailyReportSimpleElement.textContent = lines.join("\n");
+}
+
+// 这个函数把统计数据渲染到“统计弹窗”。
+function renderStatsPanel(data) {
+  if (!statsPanelContentElement) {
+    return;
+  }
+
+  if (!data || data.ok !== true) {
+    statsPanelContentElement.textContent = "（统计读取失败）";
+    return;
+  }
+
+  const historyDayDpMaxGain = Math.floor(Number(data.history_day_dp_max_gain) || 0);
+  const historyDayDpMaxGainDate = String(data.history_day_dp_max_gain_date || "").trim();
+  const historyDayDpMaxCost = Math.floor(Number(data.history_day_dp_max_cost) || 0);
+  const historyDayDpMaxCostDate = String(data.history_day_dp_max_cost_date || "").trim();
+
+  const lines = [];
+  if (historyDayDpMaxGainDate !== "") {
+    lines.push(
+      "历史单日DP最大增量：+"
+        + String(Math.max(0, historyDayDpMaxGain))
+        + "（"
+        + historyDayDpMaxGainDate
+        + "）"
+    );
+  } else {
+    lines.push("历史单日DP最大增量：+0");
+  }
+
+  if (historyDayDpMaxCostDate !== "") {
+    lines.push(
+      "历史单日DP最大减量：-"
+        + String(Math.max(0, historyDayDpMaxCost))
+        + "（"
+        + historyDayDpMaxCostDate
+        + "）"
+    );
+  } else {
+    lines.push("历史单日DP最大减量：-0");
+  }
+
+  statsPanelContentElement.textContent = lines.join("\n");
+}
+
+// 这个函数打开统计弹窗，并显示最新统计内容。
+function openStatsPanel() {
+  renderStatsPanel(latestDailyReportData);
+  setStatsPanelVisible(true);
 }
 
 // 这个函数从后端读取“每日日报（简略）”。
@@ -464,12 +542,18 @@ async function loadDailyReportSimpleFromServer() {
     const result = await response.json();
     if (!response.ok) {
       dailyReportSimpleElement.textContent = "（日报读取失败）";
+      latestDailyReportData = null;
+      renderStatsPanel(null);
       return;
     }
 
+    latestDailyReportData = result;
     renderDailyReportSimple(result);
+    renderStatsPanel(result);
   } catch (error) {
     dailyReportSimpleElement.textContent = "（日报读取失败）";
+    latestDailyReportData = null;
+    renderStatsPanel(null);
   }
 }
 
@@ -877,6 +961,18 @@ if (taskbarSettingsButtonElement) {
   });
 }
 
+// 点击“统计”按钮时，跳到统计区域。
+if (taskbarStatsButtonElement) {
+  taskbarStatsButtonElement.addEventListener("click", openStatsPanel);
+}
+
+// 点击“关闭统计弹窗”按钮时，关闭统计弹窗。
+if (closeStatsPanelButtonElement) {
+  closeStatsPanelButtonElement.addEventListener("click", function () {
+    setStatsPanelVisible(false);
+  });
+}
+
 // 点击“关闭”按钮时，关闭设置弹窗。
 if (closeSettingsPanelButtonElement) {
   closeSettingsPanelButtonElement.addEventListener("click", function () {
@@ -1106,7 +1202,10 @@ async function triggerNotifyTask(task) {
     const finalBody = body === "" ? "到点了。" : body;
 
     if (typeof window.sendSystemNotification === "function") {
-      await window.sendSystemNotification(title, finalBody);
+      // 自动触发任务使用“静默模式”：不在刷新后弹权限申请。
+      await window.sendSystemNotification(title, finalBody, {
+        allowPermissionPrompt: false,
+      });
     }
 
     await markNotifyTaskDone(taskId);

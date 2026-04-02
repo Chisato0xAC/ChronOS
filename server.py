@@ -1164,6 +1164,12 @@ def build_daily_report_simple(day_offset: int = 0) -> dict:
         "dp_change_count": 0,
         "gp_change_count": 0,
         "dp_delta_total": 0,
+        "dp_max_gain": 0,
+        "dp_max_cost": 0,
+        "history_day_dp_max_gain": 0,
+        "history_day_dp_max_gain_date": "",
+        "history_day_dp_max_cost": 0,
+        "history_day_dp_max_cost_date": "",
         "gp_delta_total": 0.0,
     }
 
@@ -1201,6 +1207,10 @@ def build_daily_report_simple(day_offset: int = 0) -> dict:
         if isinstance(undo_of_ts, int):
             undone_ts.add(undo_of_ts)
 
+    # 这个字典用于累计“每个自然统计日（按 4:00 换日）”的 DP 总变更。
+    # key: day_start_ts, value: 当日 DP 合计增减（可正可负）
+    day_dp_delta_map = {}
+
     # 再按时间正序统计，方便输出稳定顺序。
     for i in range(len(lines)):
         raw = lines[i].strip()
@@ -1222,16 +1232,20 @@ def build_daily_report_simple(day_offset: int = 0) -> dict:
         ts = record.get("ts")
         if not isinstance(ts, int):
             continue
-        if ts < day_start_ts or ts >= day_end_ts:
-            continue
         if ts in undone_ts:
             continue
-
-        result["total_events"] = int(result["total_events"]) + 1
 
         changes = record.get("changes")
         if not isinstance(changes, list):
             changes = []
+
+        # 记录级别的 DP 变更合计：用于累计到“历史单日”里。
+        record_dp_delta_total = 0
+
+        # 只有落在当前查询日窗口内，才计入“当日日报”。
+        in_target_day = ts >= day_start_ts and ts < day_end_ts
+        if in_target_day:
+            result["total_events"] = int(result["total_events"]) + 1
 
         for j in range(len(changes)):
             ch = changes[j]
@@ -1251,15 +1265,67 @@ def build_daily_report_simple(day_offset: int = 0) -> dict:
                 continue
 
             if path == "dp":
-                result["dp_change_count"] = int(result["dp_change_count"]) + 1
-                result["dp_delta_total"] = int(result["dp_delta_total"]) + int(
-                    to_number - from_number
-                )
+                dp_delta = int(to_number - from_number)
+                record_dp_delta_total = int(record_dp_delta_total) + int(dp_delta)
+
+                if in_target_day:
+                    result["dp_change_count"] = int(result["dp_change_count"]) + 1
+                    result["dp_delta_total"] = int(result["dp_delta_total"]) + int(
+                        dp_delta
+                    )
+
+                    # 单日最大 DP 获取：只看正向变化。
+                    if dp_delta > int(result["dp_max_gain"]):
+                        result["dp_max_gain"] = int(dp_delta)
+
+                    # 单日最大 DP 消耗：按正数保存“消耗量”。
+                    if dp_delta < 0:
+                        dp_cost = int(0 - dp_delta)
+                        if dp_cost > int(result["dp_max_cost"]):
+                            result["dp_max_cost"] = dp_cost
             elif path == "gp":
-                result["gp_change_count"] = int(result["gp_change_count"]) + 1
-                result["gp_delta_total"] = float(result["gp_delta_total"]) + float(
-                    to_number - from_number
-                )
+                if in_target_day:
+                    result["gp_change_count"] = int(result["gp_change_count"]) + 1
+                    result["gp_delta_total"] = float(result["gp_delta_total"]) + float(
+                        to_number - from_number
+                    )
+
+        # 把这条记录的 DP 合计累计到对应统计日。
+        if int(record_dp_delta_total) != 0:
+            record_day_start_ts, _ = get_day_window_by_boundary_ts(ts)
+            day_key = int(record_day_start_ts)
+            old_value = int(day_dp_delta_map.get(day_key, 0) or 0)
+            day_dp_delta_map[day_key] = int(old_value + int(record_dp_delta_total))
+
+    # 计算“历史单日 DP 最大增/减量”。
+    max_gain = 0
+    max_gain_day_ts = 0
+    max_cost = 0
+    max_cost_day_ts = 0
+
+    for day_start_key, day_delta in day_dp_delta_map.items():
+        safe_day_delta = int(day_delta)
+
+        if safe_day_delta > int(max_gain):
+            max_gain = int(safe_day_delta)
+            max_gain_day_ts = int(day_start_key)
+
+        if safe_day_delta < 0:
+            day_cost = int(0 - safe_day_delta)
+            if day_cost > int(max_cost):
+                max_cost = int(day_cost)
+                max_cost_day_ts = int(day_start_key)
+
+    result["history_day_dp_max_gain"] = int(max_gain)
+    result["history_day_dp_max_cost"] = int(max_cost)
+    if int(max_gain_day_ts) > 0:
+        result["history_day_dp_max_gain_date"] = datetime.fromtimestamp(
+            int(max_gain_day_ts)
+        ).strftime("%Y-%m-%d")
+    if int(max_cost_day_ts) > 0:
+        result["history_day_dp_max_cost_date"] = datetime.fromtimestamp(
+            int(max_cost_day_ts)
+        ).strftime("%Y-%m-%d")
 
     result["gp_delta_total"] = round(float(result["gp_delta_total"]), 2)
     return result

@@ -91,15 +91,28 @@
       width: 100%;
     }
 
-    #taskbarSettingsButton {
+    #taskbarSettingsButton,
+    #taskbarStatsButton {
       margin-top: 0;
       width: 56px;
       height: 28px;
     }
 
     #navBarCard.nav-top #taskbarSettingsButton,
-    #navBarCard.nav-bottom #taskbarSettingsButton {
+    #navBarCard.nav-top #taskbarStatsButton,
+    #navBarCard.nav-bottom #taskbarSettingsButton,
+    #navBarCard.nav-bottom #taskbarStatsButton {
       width: 64px;
+    }
+
+    #taskbarStatsButton {
+      margin-left: 6px;
+    }
+
+    #navBarCard.nav-left #taskbarStatsButton,
+    #navBarCard.nav-right #taskbarStatsButton {
+      margin-left: 0;
+      margin-top: 6px;
     }
 
     #settingsPanel {
@@ -124,6 +137,31 @@
     }
 
     #settingsPanel button {
+      margin-top: 8px;
+    }
+
+    #statsPanel {
+      position: fixed;
+      z-index: 1210;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      width: 320px;
+      border: 1px solid #d8d4c8;
+      background: #fffdf7;
+      padding: 10px;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+    }
+
+    #statsPanel[hidden] {
+      display: none;
+    }
+
+    #statsPanel h3 {
+      margin: 0 0 8px 0;
+    }
+
+    #statsPanel button {
       margin-top: 8px;
     }
 
@@ -217,6 +255,11 @@
       margin-top: 0;
     }
 
+    #dailyReportCard.stats-focus-flash {
+      border-color: #bfa86a;
+      box-shadow: 0 0 0 2px rgba(191, 168, 106, 0.25);
+    }
+
     @media (max-width: 900px) {
       .main-grid {
         grid-template-columns: 1fr;
@@ -258,6 +301,7 @@
 
     <div id="pageLayout">
       <article id="navBarCard" class="nav-bottom" aria-label="导航位置">
+        <button id="taskbarStatsButton" type="button">统计</button>
         <button id="taskbarSettingsButton" type="button">设置</button>
       </article>
 
@@ -272,6 +316,14 @@
         </select>
         <div>
           <button id="closeSettingsPanelButton" type="button">关闭</button>
+        </div>
+      </section>
+
+      <section id="statsPanel" aria-label="统计弹窗" hidden>
+        <h3>统计</h3>
+        <pre id="statsPanelContent">（正在读取）</pre>
+        <div>
+          <button id="closeStatsPanelButton" type="button">关闭</button>
         </div>
       </section>
 
@@ -317,7 +369,7 @@
           </table>
         </article>
 
-        <article aria-labelledby="dailyReportSimpleTitle">
+        <article id="dailyReportCard" aria-labelledby="dailyReportSimpleTitle">
           <div class="daily-report-header">
             <button id="dailyReportPrevDayButton" class="daily-report-switch-button" type="button" aria-label="查看前一天">&lt;</button>
             <h3 id="dailyReportSimpleTitle">每日日报（简略）</h3>
