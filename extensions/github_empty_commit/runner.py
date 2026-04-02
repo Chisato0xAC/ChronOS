@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import time
 from datetime import datetime
@@ -9,6 +10,8 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = PROJECT_ROOT / "data"
 PLAN_FILE = DATA_DIR / "github_empty_commit_plan.json"
+LOCK_FILE = DATA_DIR / "github_empty_commit_runner.lock"
+LOCK_STALE_SECONDS = 10 * 60
 
 
 def now_text() -> str:
@@ -67,6 +70,65 @@ def write_plan(plan: dict) -> None:
         json.dumps(plan, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+
+
+def try_acquire_runner_lock() -> bool:
+    # 防重复提交：同一时刻只允许一个 runner 执行。
+    # 这里用“创建锁文件”的方式做互斥（O_EXCL 是原子操作）。
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    now_ts = int(time.time())
+
+    if LOCK_FILE.exists():
+        try:
+            raw = LOCK_FILE.read_text(encoding="utf-8")
+            data = json.loads(raw)
+            lock_ts = int(data.get("created_ts", 0) or 0)
+        except Exception:
+            lock_ts = 0
+
+        # 兜底：锁文件长期不释放时，自动认定为过期锁并清理。
+        if lock_ts > 0 and (now_ts - lock_ts) < LOCK_STALE_SECONDS:
+            return False
+
+        try:
+            LOCK_FILE.unlink()
+            log("检测到过期锁，已自动清理")
+        except Exception:
+            return False
+
+    try:
+        fd = os.open(
+            str(LOCK_FILE),
+            os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+        )
+        os.write(
+            fd,
+            json.dumps(
+                {
+                    "pid": os.getpid(),
+                    "created_ts": now_ts,
+                    "created_text": now_text(),
+                },
+                ensure_ascii=False,
+                indent=2,
+            ).encode("utf-8"),
+        )
+        os.close(fd)
+        return True
+    except FileExistsError:
+        return False
+    except Exception as e:
+        log("创建执行锁失败: " + str(e))
+        return False
+
+
+def release_runner_lock() -> None:
+    # 释放互斥锁：无论成功失败，都尽量删除锁文件。
+    try:
+        if LOCK_FILE.exists():
+            LOCK_FILE.unlink()
+    except Exception:
+        return
 
 
 def resolve_repo_path(raw_path: str) -> Path:
@@ -165,52 +227,60 @@ def main() -> int:
             time.sleep(60)
             continue
 
-        repo_path = str(plan.get("repo_path", "")).strip()
-        if repo_path == "":
-            plan["pending"] = False
-            plan["last_result"] = "missing_repo_path"
-            write_plan(plan)
-            time.sleep(60)
+        # 关键：多个 runner 同时运行时，只有一个允许进入提交流程。
+        if not try_acquire_runner_lock():
+            time.sleep(2)
             continue
 
-        repo_dir = resolve_repo_path(repo_path)
-        if not repo_dir.exists():
+        try:
+            repo_path = str(plan.get("repo_path", "")).strip()
+            if repo_path == "":
+                plan["pending"] = False
+                plan["last_result"] = "missing_repo_path"
+                write_plan(plan)
+                time.sleep(60)
+                continue
+
+            repo_dir = resolve_repo_path(repo_path)
+            if not repo_dir.exists():
+                plan["pending"] = False
+                plan["last_result"] = "repo_path_not_found"
+                write_plan(plan)
+                time.sleep(60)
+                continue
+
+            if not (repo_dir / ".git").exists():
+                plan["pending"] = False
+                plan["last_result"] = "not_git_repo"
+                write_plan(plan)
+                time.sleep(60)
+                continue
+
+            commit_message = str(plan.get("commit_message", "chore: keepalive")).strip()
+            if commit_message == "":
+                commit_message = "chore: keepalive"
+
+            ok = run_empty_commit(repo_dir, commit_message)
+            if not ok:
+                plan["pending"] = False
+                plan["last_result"] = "commit_failed"
+                write_plan(plan)
+                time.sleep(60)
+                continue
+
+            push_remote = str(plan.get("push_remote", "origin")).strip() or "origin"
+            push_branch = str(plan.get("push_branch", "")).strip()
+            ok_push = run_git_push(repo_dir, push_remote, push_branch)
+
             plan["pending"] = False
-            plan["last_result"] = "repo_path_not_found"
+            plan["last_run_ts"] = int(time.time())
+            plan["last_run_text"] = now_text()
+            plan["last_result"] = "push_ok" if ok_push else "push_failed"
             write_plan(plan)
+
             time.sleep(60)
-            continue
-
-        if not (repo_dir / ".git").exists():
-            plan["pending"] = False
-            plan["last_result"] = "not_git_repo"
-            write_plan(plan)
-            time.sleep(60)
-            continue
-
-        commit_message = str(plan.get("commit_message", "chore: keepalive")).strip()
-        if commit_message == "":
-            commit_message = "chore: keepalive"
-
-        ok = run_empty_commit(repo_dir, commit_message)
-        if not ok:
-            plan["pending"] = False
-            plan["last_result"] = "commit_failed"
-            write_plan(plan)
-            time.sleep(60)
-            continue
-
-        push_remote = str(plan.get("push_remote", "origin")).strip() or "origin"
-        push_branch = str(plan.get("push_branch", "")).strip()
-        ok_push = run_git_push(repo_dir, push_remote, push_branch)
-
-        plan["pending"] = False
-        plan["last_run_ts"] = int(time.time())
-        plan["last_run_text"] = now_text()
-        plan["last_result"] = "push_ok" if ok_push else "push_failed"
-        write_plan(plan)
-
-        time.sleep(60)
+        finally:
+            release_runner_lock()
 
 
 if __name__ == "__main__":

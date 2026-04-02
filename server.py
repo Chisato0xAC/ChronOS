@@ -28,6 +28,8 @@ os.environ["PYTHONPYCACHEPREFIX"] = str(PY_CACHE_DIR)
 SRC_DIR = Path(__file__).resolve().parent / "src"
 # 这个路径指向根目录 data 文件夹。
 DATA_DIR = Path(__file__).resolve().parent / "data"
+# 主服务单实例锁文件：防止误开多个 server.py。
+SERVER_LOCK_FILE = DATA_DIR / "server.lock"
 # 这个路径指向项目里的状态文件，用来保存 DP 和 GP。
 STATE_FILE = DATA_DIR / "state.json"
 
@@ -110,6 +112,78 @@ MANAGED_CHILD_RESTART_GUARD_WINDOW_SECONDS = 30
 MANAGED_CHILD_RESTART_GUARD_MAX_COUNT = 5
 MANAGED_CHILD_RESTART_TIMES = {}
 MANAGED_CHILD_RESTART_DISABLED = set()
+
+
+def is_process_alive(pid: int) -> bool:
+    # 判断一个进程是否仍在运行。
+    if int(pid) <= 0:
+        return False
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except PermissionError:
+        # 没有权限也说明进程存在。
+        return True
+    except Exception:
+        return False
+
+
+def try_acquire_server_lock() -> bool:
+    # 获取主服务锁：同一时刻只允许一个 server.py 运行。
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+    if SERVER_LOCK_FILE.exists():
+        try:
+            raw = SERVER_LOCK_FILE.read_text(encoding="utf-8")
+            info = json.loads(raw)
+            lock_pid = int(info.get("pid", 0) or 0)
+        except Exception:
+            lock_pid = 0
+
+        # 锁存在且进程还活着：说明已有主服务在跑。
+        if lock_pid > 0 and is_process_alive(lock_pid):
+            return False
+
+        # 锁是脏锁（进程已退出）：清理后继续抢锁。
+        try:
+            SERVER_LOCK_FILE.unlink()
+            log("检测到旧服务锁，已自动清理")
+        except Exception:
+            return False
+
+    try:
+        fd = os.open(
+            str(SERVER_LOCK_FILE),
+            os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+        )
+        os.write(
+            fd,
+            json.dumps(
+                {
+                    "pid": os.getpid(),
+                    "created_ts": int(time.time()),
+                    "created_text": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                },
+                ensure_ascii=False,
+                indent=2,
+            ).encode("utf-8"),
+        )
+        os.close(fd)
+        return True
+    except FileExistsError:
+        return False
+    except Exception as e:
+        log_error("主服务锁创建失败: " + str(e))
+        return False
+
+
+def release_server_lock() -> None:
+    # 释放主服务锁：进程退出时清理锁文件。
+    try:
+        if SERVER_LOCK_FILE.exists():
+            SERVER_LOCK_FILE.unlink()
+    except Exception:
+        return
 
 
 def ensure_utf8_stdio() -> None:
@@ -2565,50 +2639,56 @@ if __name__ == "__main__":
     # 尽量保证日志文件可读（UTF-8）。
     ensure_utf8_stdio()
 
-    # 启动前，先确保状态文件存在。
-    ensure_state_file_exists()
-    ensure_note_file_exists()
-    ensure_notify_tasks_file_exists()
-    ensure_crawler_state_file_exists()
-    ensure_state_history_file_exists()
-    ensure_process_watch_file_exists()
+    # 启动前先抢“主服务单实例锁”，防止重复启动。
+    if not try_acquire_server_lock():
+        log_error("检测到已有 ChronOS 主服务在运行，本次启动已取消")
+        raise SystemExit(1)
 
-    # 启动时自动安装 git hooks：让 commit/tag 能自动触发扩展规则。
-    ensure_git_hooks_installed()
-
-    # 启动时也尝试接一次爬虫 pending（用于“程序没运行时错过 4:00”的补偿）。
-    apply_crawler_pending_changes_once()
-
-    # 启动后台调度：主程序负责到点启动工具脚本
-    t = threading.Thread(target=crawler_scheduler_loop, daemon=True)
-    t.start()
-
-    # 启动后台监控：用于发现“外部改动 state.json”的情况。
-    watcher = threading.Thread(target=state_file_watcher_loop, daemon=True)
-    watcher.start()
-
-    # 读取主调度器子进程配置（可扩展）。
-    load_managed_child_specs_from_config()
-
-    # 启动主调度器托管子进程（当前先托管 process_watch）。
-    start_managed_children()
-
-    # 启动子进程守护线程（为后续更多子进程预留）。
-    child_supervisor = threading.Thread(
-        target=managed_child_supervisor_loop, daemon=True
-    )
-    child_supervisor.start()
-
-    # 使用 ThreadingHTTPServer：因为 SSE 连接会长期占用一个请求。
-    # 生产环境（如 Render）会通过环境变量 PORT 指定端口。
-    port_text = os.getenv("PORT", "8000")
     try:
-        port = int(port_text)
-    except Exception:
-        port = 8000
-    server = ChronosThreadingHTTPServer(("0.0.0.0", port), SaveDpHandler)
-    log("Server running at http://0.0.0.0:" + str(port))
-    try:
+        # 启动前，先确保状态文件存在。
+        ensure_state_file_exists()
+        ensure_note_file_exists()
+        ensure_notify_tasks_file_exists()
+        ensure_crawler_state_file_exists()
+        ensure_state_history_file_exists()
+        ensure_process_watch_file_exists()
+
+        # 启动时自动安装 git hooks：让 commit/tag 能自动触发扩展规则。
+        ensure_git_hooks_installed()
+
+        # 启动时也尝试接一次爬虫 pending（用于“程序没运行时错过 4:00”的补偿）。
+        apply_crawler_pending_changes_once()
+
+        # 启动后台调度：主程序负责到点启动工具脚本
+        t = threading.Thread(target=crawler_scheduler_loop, daemon=True)
+        t.start()
+
+        # 启动后台监控：用于发现“外部改动 state.json”的情况。
+        watcher = threading.Thread(target=state_file_watcher_loop, daemon=True)
+        watcher.start()
+
+        # 读取主调度器子进程配置（可扩展）。
+        load_managed_child_specs_from_config()
+
+        # 启动主调度器托管子进程（当前先托管 process_watch）。
+        start_managed_children()
+
+        # 启动子进程守护线程（为后续更多子进程预留）。
+        child_supervisor = threading.Thread(
+            target=managed_child_supervisor_loop, daemon=True
+        )
+        child_supervisor.start()
+
+        # 使用 ThreadingHTTPServer：因为 SSE 连接会长期占用一个请求。
+        # 生产环境（如 Render）会通过环境变量 PORT 指定端口。
+        port_text = os.getenv("PORT", "8000")
+        try:
+            port = int(port_text)
+        except Exception:
+            port = 8000
+        server = ChronosThreadingHTTPServer(("0.0.0.0", port), SaveDpHandler)
+        log("Server running at http://0.0.0.0:" + str(port))
         server.serve_forever()
     finally:
         stop_managed_children()
+        release_server_lock()
