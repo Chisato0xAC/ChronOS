@@ -91,28 +91,100 @@
       width: 100%;
     }
 
-    #taskbarSettingsButton,
-    #taskbarStatsButton {
+    #taskbarStatusButton,
+    #taskbarItemsButton,
+    #taskbarRecordsButton,
+    #taskbarToolsButton,
+    #taskbarStatsButton,
+    #taskbarSettingsButton {
       margin-top: 0;
       width: 56px;
       height: 28px;
     }
 
-    #navBarCard.nav-top #taskbarSettingsButton,
+    #navBarCard.nav-top #taskbarStatusButton,
+    #navBarCard.nav-top #taskbarItemsButton,
+    #navBarCard.nav-top #taskbarRecordsButton,
+    #navBarCard.nav-top #taskbarToolsButton,
     #navBarCard.nav-top #taskbarStatsButton,
-    #navBarCard.nav-bottom #taskbarSettingsButton,
-    #navBarCard.nav-bottom #taskbarStatsButton {
+    #navBarCard.nav-top #taskbarSettingsButton,
+    #navBarCard.nav-bottom #taskbarStatusButton,
+    #navBarCard.nav-bottom #taskbarItemsButton,
+    #navBarCard.nav-bottom #taskbarRecordsButton,
+    #navBarCard.nav-bottom #taskbarToolsButton,
+    #navBarCard.nav-bottom #taskbarStatsButton,
+    #navBarCard.nav-bottom #taskbarSettingsButton {
       width: 64px;
     }
 
-    #taskbarStatsButton {
+    #taskbarItemsButton,
+    #taskbarRecordsButton,
+    #taskbarToolsButton,
+    #taskbarStatsButton,
+    #taskbarSettingsButton {
       margin-left: 6px;
     }
 
+    #navBarCard.nav-left #taskbarStatusButton,
+    #navBarCard.nav-left #taskbarItemsButton,
+    #navBarCard.nav-left #taskbarRecordsButton,
+    #navBarCard.nav-left #taskbarToolsButton,
     #navBarCard.nav-left #taskbarStatsButton,
-    #navBarCard.nav-right #taskbarStatsButton {
+    #navBarCard.nav-left #taskbarSettingsButton,
+    #navBarCard.nav-right #taskbarStatusButton,
+    #navBarCard.nav-right #taskbarItemsButton,
+    #navBarCard.nav-right #taskbarRecordsButton,
+    #navBarCard.nav-right #taskbarToolsButton,
+    #navBarCard.nav-right #taskbarStatsButton,
+    #navBarCard.nav-right #taskbarSettingsButton {
       margin-left: 0;
       margin-top: 6px;
+    }
+
+    #taskbarStatusButton,
+    #taskbarItemsButton {
+      opacity: 1;
+      cursor: pointer;
+    }
+
+    .taskbar-button-active {
+      background: #efe5c9;
+      border-color: #c9b278;
+    }
+
+    #cuteDevToast {
+      position: fixed;
+      z-index: 2000;
+      top: 14px;
+      left: 50%;
+      transform: translateX(-50%);
+      padding: 8px 14px;
+      border: 1px solid #d8d4c8;
+      border-radius: 999px;
+      background: #fff8dc;
+      color: #5b4636;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+      opacity: 0;
+      pointer-events: none;
+    }
+
+    #cuteDevToast.toast-show {
+      animation: toastFadeOut 1.6s ease forwards;
+    }
+
+    @keyframes toastFadeOut {
+      0% {
+        opacity: 0;
+      }
+      20% {
+        opacity: 1;
+      }
+      70% {
+        opacity: 1;
+      }
+      100% {
+        opacity: 0;
+      }
     }
 
     #settingsPanel {
@@ -162,6 +234,83 @@
     }
 
     #statsPanel button {
+      margin-top: 8px;
+    }
+
+    #recordsPanel {
+      position: fixed;
+      z-index: 1210;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      width: 360px;
+      border: 1px solid #d8d4c8;
+      background: #fffdf7;
+      padding: 10px;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+    }
+
+    #recordsPanel[hidden] {
+      display: none;
+    }
+
+    #recordsPanel h3 {
+      margin: 0 0 8px 0;
+    }
+
+    #recordsPanel button {
+      margin-top: 8px;
+    }
+
+    #toolsPanel {
+      position: fixed;
+      z-index: 1220;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      width: 420px;
+      max-height: 78vh;
+      overflow-y: auto;
+      border: 1px solid #d8d4c8;
+      background: #fffdf7;
+      padding: 10px;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+    }
+
+    #toolsPanel[hidden] {
+      display: none;
+    }
+
+    #toolsPanel h3 {
+      margin: 0 0 8px 0;
+    }
+
+    #toolsPanel button {
+      margin-top: 8px;
+    }
+
+    #itemsPanel {
+      position: fixed;
+      z-index: 1230;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      width: 280px;
+      border: 1px solid #d8d4c8;
+      background: #fffdf7;
+      padding: 10px;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+    }
+
+    #itemsPanel[hidden] {
+      display: none;
+    }
+
+    #itemsPanel h3 {
+      margin: 0 0 8px 0;
+    }
+
+    #itemsPanel button {
       margin-top: 8px;
     }
 
@@ -301,6 +450,10 @@
 
     <div id="pageLayout">
       <article id="navBarCard" class="nav-bottom" aria-label="导航位置">
+        <button id="taskbarStatusButton" type="button">状态</button>
+        <button id="taskbarItemsButton" type="button">物品</button>
+        <button id="taskbarRecordsButton" type="button">记录</button>
+        <button id="taskbarToolsButton" type="button">工具</button>
         <button id="taskbarStatsButton" type="button">统计</button>
         <button id="taskbarSettingsButton" type="button">设置</button>
       </article>
@@ -327,6 +480,62 @@
         </div>
       </section>
 
+      <section id="recordsPanel" aria-label="记录弹窗" hidden>
+        <h3>记录</h3>
+        <pre id="historyList">（暂无）</pre>
+        <div>
+          <button id="closeRecordsPanelButton" type="button">关闭</button>
+        </div>
+      </section>
+
+      <section id="toolsPanel" aria-label="工具弹窗" hidden>
+        <h3>工具</h3>
+
+        <details>
+          <summary>通知</summary>
+          <div>
+            <label for="notifyDelayHoursInput">延迟时间（时:分:秒）：</label>
+            <input id="notifyDelayHoursInput" type="number" min="0" max="99" value="0" />
+            <span>:</span>
+            <input id="notifyDelayMinutesInput" type="number" min="0" max="59" value="0" />
+            <span>:</span>
+            <input id="notifyDelaySecondsInput" type="number" min="0" max="59" value="5" />
+          </div>
+          <p id="notifySchedulePreview">将在 --:--:-- 通知</p>
+          <button id="notifyButton" type="button">发布通知任务</button>
+          <p>待触发通知任务：</p>
+          <pre id="notifyTaskList">（暂无）</pre>
+        </details>
+
+        <details>
+          <summary>便签</summary>
+          <fieldset>
+            <legend>便签（自动保存）</legend>
+            <label for="noteInput">在这里写笔记：</label>
+            <br />
+            <textarea id="noteInput" rows="14" cols="32"></textarea>
+            <p id="noteSaveStatus">（尚未保存）</p>
+          </fieldset>
+        </details>
+
+        <details>
+          <summary>悬浮窗</summary>
+          <button id="openFloatingWindowButton" type="button">打开悬浮窗</button>
+        </details>
+
+        <div>
+          <button id="closeToolsPanelButton" type="button">关闭</button>
+        </div>
+      </section>
+
+      <section id="itemsPanel" aria-label="物品弹窗" hidden>
+        <h3>物品</h3>
+        <pre>（预留入口，后续补功能）</pre>
+        <div>
+          <button id="closeItemsPanelButton" type="button">关闭</button>
+        </div>
+      </section>
+
       <section id="mainContentSection" class="main-grid">
       <div class="left-column">
         <article aria-labelledby="dpActionTitle">
@@ -348,10 +557,6 @@
           </div>
         </article>
 
-        <article aria-labelledby="historyTitle">
-          <h3 id="historyTitle">历史记录</h3>
-          <pre id="historyList">（暂无）</pre>
-        </article>
       </div>
 
       <div class="right-column">
@@ -378,45 +583,12 @@
           <pre id="dailyReportSimple">（正在读取）</pre>
         </article>
 
-        <article aria-labelledby="notifyTitle">
-          <h3 id="notifyTitle">功能列表</h3>
-
-          <details>
-            <summary>通知</summary>
-            <div>
-              <label for="notifyDelayHoursInput">延迟时间（时:分:秒）：</label>
-              <input id="notifyDelayHoursInput" type="number" min="0" max="99" value="0" />
-              <span>:</span>
-              <input id="notifyDelayMinutesInput" type="number" min="0" max="59" value="0" />
-              <span>:</span>
-              <input id="notifyDelaySecondsInput" type="number" min="0" max="59" value="5" />
-            </div>
-            <p id="notifySchedulePreview">将在 --:--:-- 通知</p>
-            <button id="notifyButton" type="button">发布通知任务</button>
-            <p>待触发通知任务：</p>
-            <pre id="notifyTaskList">（暂无）</pre>
-          </details>
-
-          <details>
-            <summary>便签</summary>
-            <fieldset>
-              <legend>便签（自动保存）</legend>
-              <label for="noteInput">在这里写笔记：</label>
-              <br />
-              <textarea id="noteInput" rows="14" cols="32"></textarea>
-              <p id="noteSaveStatus">（尚未保存）</p>
-            </fieldset>
-          </details>
-
-          <details>
-            <summary>悬浮窗</summary>
-            <button id="openFloatingWindowButton" type="button">打开悬浮窗</button>
-          </details>
-        </article>
       </div>
       </section>
     </div>
   </main>
+
+  <div id="cuteDevToast" aria-live="polite">开发中……喵~</div>
 
   <script src="notify.js"></script>
   <script src="main.js"></script>

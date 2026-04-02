@@ -43,6 +43,14 @@ const navPositionSelectElement = document.getElementById("navPositionSelect");
 const navBarCardElement = document.getElementById("navBarCard");
 // 这行代码拿到“设置”按钮。
 const taskbarSettingsButtonElement = document.getElementById("taskbarSettingsButton");
+// 这行代码拿到“状态”按钮。
+const taskbarStatusButtonElement = document.getElementById("taskbarStatusButton");
+// 这行代码拿到“物品”按钮。
+const taskbarItemsButtonElement = document.getElementById("taskbarItemsButton");
+// 这行代码拿到“工具”按钮。
+const taskbarToolsButtonElement = document.getElementById("taskbarToolsButton");
+// 这行代码拿到“记录”按钮。
+const taskbarRecordsButtonElement = document.getElementById("taskbarRecordsButton");
 // 这行代码拿到“统计”按钮。
 const taskbarStatsButtonElement = document.getElementById("taskbarStatsButton");
 // 这行代码拿到“设置弹窗”。
@@ -55,6 +63,14 @@ const statsPanelElement = document.getElementById("statsPanel");
 const statsPanelContentElement = document.getElementById("statsPanelContent");
 // 这行代码拿到“关闭统计弹窗”按钮。
 const closeStatsPanelButtonElement = document.getElementById("closeStatsPanelButton");
+// 这行代码拿到“记录弹窗”。
+const recordsPanelElement = document.getElementById("recordsPanel");
+// 这行代码拿到“关闭记录弹窗”按钮。
+const closeRecordsPanelButtonElement = document.getElementById("closeRecordsPanelButton");
+// 这行代码拿到“工具弹窗”。
+const toolsPanelElement = document.getElementById("toolsPanel");
+// 这行代码拿到“关闭工具弹窗”按钮。
+const closeToolsPanelButtonElement = document.getElementById("closeToolsPanelButton");
 // 这行代码拿到主内容容器，用于给任务栏让出空间。
 const mainRootElement = document.getElementById("mainRoot");
 // 这行代码拿到“通知延迟秒数”输入框。
@@ -67,6 +83,8 @@ const notifyDelaySecondsInputElement = document.getElementById("notifyDelaySecon
 const notifySchedulePreviewElement = document.getElementById("notifySchedulePreview");
 // 这行代码拿到“通知任务列表”显示区域。
 const notifyTaskListElement = document.getElementById("notifyTaskList");
+// 这行代码拿到“开发中提示条”。
+const cuteDevToastElement = document.getElementById("cuteDevToast");
 // 单页布局下，历史区固定显示最近几条，避免出现翻页。
 const HISTORY_FETCH_LIMIT = 16;
 // 记录 SSE 是否已经成功连接过一次（用于判断“重连”）。
@@ -83,6 +101,68 @@ let notifyTasksPollTimer = null;
 let dailyReportDayOffset = 0;
 // 这个变量保存“最近一次日报原始数据”，给统计弹窗复用。
 let latestDailyReportData = null;
+// 这个定时器用于控制“开发中提示条”的渐变消失。
+let cuteDevToastTimer = null;
+
+// 这个函数根据面板开关状态，更新任务栏按钮高亮。
+function refreshTaskbarActiveButtons() {
+  if (taskbarSettingsButtonElement) {
+    taskbarSettingsButtonElement.classList.toggle(
+      "taskbar-button-active",
+      Boolean(settingsPanelElement && settingsPanelElement.hidden === false)
+    );
+  }
+
+  if (taskbarRecordsButtonElement) {
+    taskbarRecordsButtonElement.classList.toggle(
+      "taskbar-button-active",
+      Boolean(recordsPanelElement && recordsPanelElement.hidden === false)
+    );
+  }
+
+  if (taskbarToolsButtonElement) {
+    taskbarToolsButtonElement.classList.toggle(
+      "taskbar-button-active",
+      Boolean(toolsPanelElement && toolsPanelElement.hidden === false)
+    );
+  }
+
+  if (taskbarStatsButtonElement) {
+    taskbarStatsButtonElement.classList.toggle(
+      "taskbar-button-active",
+      Boolean(statsPanelElement && statsPanelElement.hidden === false)
+    );
+  }
+}
+
+// 这个函数显示“开发中”提示，并让它渐变消失。
+function showCuteDevelopingToast(event) {
+  // 只响应“真实鼠标/触控抬起”，避免刷新/恢复焦点时被动触发 click。
+  if (!event || event.type !== "pointerup" || event.isTrusted !== true) {
+    return;
+  }
+
+  if (event.button !== 0) {
+    return;
+  }
+
+  if (!cuteDevToastElement) {
+    return;
+  }
+
+  cuteDevToastElement.classList.remove("toast-show");
+  void cuteDevToastElement.offsetWidth;
+  cuteDevToastElement.classList.add("toast-show");
+
+  if (cuteDevToastTimer !== null) {
+    window.clearTimeout(cuteDevToastTimer);
+  }
+
+  cuteDevToastTimer = window.setTimeout(function () {
+    cuteDevToastElement.classList.remove("toast-show");
+    cuteDevToastTimer = null;
+  }, 1700);
+}
 
 // 这个函数把导航栏贴到页面边缘（上/下/左/右，类似开始菜单停靠）。
 function applyNavPosition(positionValue) {
@@ -119,10 +199,12 @@ function setSettingsPanelVisible(visible) {
 
   if (visible) {
     settingsPanelElement.hidden = false;
+    refreshTaskbarActiveButtons();
     return;
   }
 
   settingsPanelElement.hidden = true;
+  refreshTaskbarActiveButtons();
 }
 
 // 这个函数负责显示或隐藏“统计弹窗”。
@@ -133,10 +215,60 @@ function setStatsPanelVisible(visible) {
 
   if (visible) {
     statsPanelElement.hidden = false;
+    refreshTaskbarActiveButtons();
     return;
   }
 
   statsPanelElement.hidden = true;
+  refreshTaskbarActiveButtons();
+}
+
+// 这个函数负责显示或隐藏“记录弹窗”。
+function setRecordsPanelVisible(visible) {
+  if (!recordsPanelElement) {
+    return;
+  }
+
+  if (visible) {
+    recordsPanelElement.hidden = false;
+    refreshTaskbarActiveButtons();
+    return;
+  }
+
+  recordsPanelElement.hidden = true;
+  refreshTaskbarActiveButtons();
+}
+
+// 这个函数负责显示或隐藏“工具弹窗”。
+function setToolsPanelVisible(visible) {
+  if (!toolsPanelElement) {
+    return;
+  }
+
+  if (visible) {
+    toolsPanelElement.hidden = false;
+    refreshTaskbarActiveButtons();
+    return;
+  }
+
+  toolsPanelElement.hidden = true;
+  refreshTaskbarActiveButtons();
+}
+
+// 这个函数用于一次性关闭任务栏相关弹窗，避免多个弹窗同时打开。
+function closeAllTaskbarPanels() {
+  setSettingsPanelVisible(false);
+  setStatsPanelVisible(false);
+  setRecordsPanelVisible(false);
+  setToolsPanelVisible(false);
+}
+
+// 这个函数判断：目标节点是否在某个容器里（含容器自身）。
+function isInsideElement(containerElement, targetNode) {
+  if (!containerElement || !targetNode) {
+    return false;
+  }
+  return containerElement.contains(targetNode);
 }
 
 // 这个函数根据任务栏当前位置，给主内容设置安全边距。
@@ -524,8 +656,36 @@ function renderStatsPanel(data) {
 
 // 这个函数打开统计弹窗，并显示最新统计内容。
 function openStatsPanel() {
+  const shouldCloseCurrent = statsPanelElement && statsPanelElement.hidden === false;
+  closeAllTaskbarPanels();
+  if (shouldCloseCurrent) {
+    return;
+  }
+
   renderStatsPanel(latestDailyReportData);
   setStatsPanelVisible(true);
+}
+
+// 这个函数打开记录弹窗。
+function openRecordsPanel() {
+  const shouldCloseCurrent = recordsPanelElement && recordsPanelElement.hidden === false;
+  closeAllTaskbarPanels();
+  if (shouldCloseCurrent) {
+    return;
+  }
+
+  setRecordsPanelVisible(true);
+}
+
+// 这个函数打开工具弹窗。
+function openToolsPanel() {
+  const shouldCloseCurrent = toolsPanelElement && toolsPanelElement.hidden === false;
+  closeAllTaskbarPanels();
+  if (shouldCloseCurrent) {
+    return;
+  }
+
+  setToolsPanelVisible(true);
 }
 
 // 这个函数从后端读取“每日日报（简略）”。
@@ -752,7 +912,7 @@ function startStateEventStream() {
   const source = new EventSource("/api/events");
 
   // 第一次连接只做标记；后续如果是“重连成功”，说明后端很可能重启过。
-  // 这时刷新页面，拿到最新的 HTML/JS。
+  // 这里不再整页刷新，避免页面被强制重载；改为静默补拉一次数据。
   source.onopen = function () {
     serviceStatusElement.textContent = "🟢 Connected";
 
@@ -761,7 +921,11 @@ function startStateEventStream() {
       return;
     }
 
-    window.location.reload();
+    loadStateFromFile();
+    loadHistoryFromServer();
+    loadDailyReportSimpleFromServer();
+    loadNotifyTasksFromServer();
+    syncMainRootOffset();
   };
 
   // 收到名为 state 的事件时，重新读取 data/state.json。
@@ -957,8 +1121,38 @@ if (navPositionSelectElement) {
 // 点击“设置”按钮时，打开设置弹窗。
 if (taskbarSettingsButtonElement) {
   taskbarSettingsButtonElement.addEventListener("click", function () {
+    const shouldCloseCurrent = settingsPanelElement && settingsPanelElement.hidden === false;
+    closeAllTaskbarPanels();
+    if (shouldCloseCurrent) {
+      return;
+    }
+
     setSettingsPanelVisible(true);
   });
+}
+
+// 点击“状态”按钮时，显示“开发中”提示。
+if (taskbarStatusButtonElement) {
+  taskbarStatusButtonElement.addEventListener("pointerup", function (event) {
+    showCuteDevelopingToast(event);
+  });
+}
+
+// 点击“物品”按钮时，显示“开发中”提示。
+if (taskbarItemsButtonElement) {
+  taskbarItemsButtonElement.addEventListener("pointerup", function (event) {
+    showCuteDevelopingToast(event);
+  });
+}
+
+// 点击“工具”按钮时，打开工具弹窗。
+if (taskbarToolsButtonElement) {
+  taskbarToolsButtonElement.addEventListener("click", openToolsPanel);
+}
+
+// 点击“记录”按钮时，打开记录弹窗。
+if (taskbarRecordsButtonElement) {
+  taskbarRecordsButtonElement.addEventListener("click", openRecordsPanel);
 }
 
 // 点击“统计”按钮时，跳到统计区域。
@@ -973,6 +1167,20 @@ if (closeStatsPanelButtonElement) {
   });
 }
 
+// 点击“关闭记录弹窗”按钮时，关闭记录弹窗。
+if (closeRecordsPanelButtonElement) {
+  closeRecordsPanelButtonElement.addEventListener("click", function () {
+    setRecordsPanelVisible(false);
+  });
+}
+
+// 点击“关闭工具弹窗”按钮时，关闭工具弹窗。
+if (closeToolsPanelButtonElement) {
+  closeToolsPanelButtonElement.addEventListener("click", function () {
+    setToolsPanelVisible(false);
+  });
+}
+
 // 点击“关闭”按钮时，关闭设置弹窗。
 if (closeSettingsPanelButtonElement) {
   closeSettingsPanelButtonElement.addEventListener("click", function () {
@@ -982,6 +1190,41 @@ if (closeSettingsPanelButtonElement) {
 
 // 窗口尺寸变化时重新计算一次，保证不遮挡。
 window.addEventListener("resize", syncMainRootOffset);
+
+// 点击任务栏和弹窗外部区域时，自动关闭任务栏弹窗。
+document.addEventListener("click", function (event) {
+  const target = event.target;
+
+  // 点在任务栏按钮区时，不执行外部关闭。
+  if (isInsideElement(navBarCardElement, target)) {
+    return;
+  }
+
+  // 点在任一弹窗内部时，也不关闭。
+  if (isInsideElement(settingsPanelElement, target)) {
+    return;
+  }
+  if (isInsideElement(statsPanelElement, target)) {
+    return;
+  }
+  if (isInsideElement(recordsPanelElement, target)) {
+    return;
+  }
+  if (isInsideElement(toolsPanelElement, target)) {
+    return;
+  }
+
+  closeAllTaskbarPanels();
+});
+
+// 按下 Esc 键时，关闭当前任务栏弹窗。
+document.addEventListener("keydown", function (event) {
+  if (event.key !== "Escape") {
+    return;
+  }
+
+  closeAllTaskbarPanels();
+});
 
 // ---------------------------
 // 通知功能（只做“接线”，逻辑在 notify.js）
