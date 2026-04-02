@@ -37,6 +37,18 @@ const noteInputElement = document.getElementById("noteInput");
 const noteSaveStatusElement = document.getElementById("noteSaveStatus");
 // 这行代码拿到“打开悬浮窗”按钮。
 const openFloatingWindowButtonElement = document.getElementById("openFloatingWindowButton");
+// 这行代码拿到“导航栏位置”下拉框。
+const navPositionSelectElement = document.getElementById("navPositionSelect");
+// 这行代码拿到“导航栏卡片”本体。
+const navBarCardElement = document.getElementById("navBarCard");
+// 这行代码拿到“设置”按钮。
+const taskbarSettingsButtonElement = document.getElementById("taskbarSettingsButton");
+// 这行代码拿到“设置弹窗”。
+const settingsPanelElement = document.getElementById("settingsPanel");
+// 这行代码拿到“关闭设置弹窗”按钮。
+const closeSettingsPanelButtonElement = document.getElementById("closeSettingsPanelButton");
+// 这行代码拿到主内容容器，用于给任务栏让出空间。
+const mainRootElement = document.getElementById("mainRoot");
 // 这行代码拿到“通知延迟秒数”输入框。
 const notifyDelayHoursInputElement = document.getElementById("notifyDelayHoursInput");
 // 这行代码拿到“通知延迟分钟”输入框。
@@ -61,6 +73,98 @@ let notifyTaskInFlightMap = {};
 let notifyTasksPollTimer = null;
 // 这个变量保存“每日日报”当前查看的日期偏移：0=今天，-1=昨天。
 let dailyReportDayOffset = 0;
+
+// 这个函数把导航栏贴到页面边缘（上/下/左/右，类似开始菜单停靠）。
+function applyNavPosition(positionValue) {
+  if (!navBarCardElement) {
+    return;
+  }
+
+  const allowed = {
+    top: "nav-top",
+    bottom: "nav-bottom",
+    left: "nav-left",
+    right: "nav-right",
+  };
+
+  const safePosition = String(positionValue || "top").toLowerCase();
+  const targetClass = allowed[safePosition] || allowed.top;
+
+  navBarCardElement.classList.remove("nav-top", "nav-bottom", "nav-left", "nav-right");
+  navBarCardElement.classList.add(targetClass);
+
+  // 任务栏换边后，重新给主内容让出对应空间，避免内容被挡住。
+  syncMainRootOffset();
+
+  if (navPositionSelectElement) {
+    navPositionSelectElement.value = safePosition in allowed ? safePosition : "top";
+  }
+}
+
+// 这个函数负责显示或隐藏“设置弹窗”。
+function setSettingsPanelVisible(visible) {
+  if (!settingsPanelElement) {
+    return;
+  }
+
+  if (visible) {
+    settingsPanelElement.hidden = false;
+    return;
+  }
+
+  settingsPanelElement.hidden = true;
+}
+
+// 这个函数根据任务栏当前位置，给主内容设置安全边距。
+function syncMainRootOffset() {
+  if (!mainRootElement || !navBarCardElement) {
+    return;
+  }
+
+  const barHeight = navBarCardElement.offsetHeight;
+  const barWidth = navBarCardElement.offsetWidth;
+  const barRect = navBarCardElement.getBoundingClientRect();
+  const statusRect = serviceStatusElement ? serviceStatusElement.getBoundingClientRect() : null;
+
+  // 先清空，再按方向加一个边距。
+  mainRootElement.style.marginTop = "0px";
+  mainRootElement.style.marginBottom = "0px";
+  mainRootElement.style.marginLeft = "0px";
+  mainRootElement.style.marginRight = "0px";
+
+  // 额外预留 10 像素，避免视觉上贴得太紧。
+  const safeGap = 10;
+
+  if (navBarCardElement.classList.contains("nav-top")) {
+    let topOffset = barHeight + safeGap;
+
+    // 顶部时如果和右上角 Status 区域重叠，就让内容再下移，避免被挡。
+    if (statusRect) {
+      const isHorizontalOverlap = !(barRect.right < statusRect.left || barRect.left > statusRect.right);
+      if (isHorizontalOverlap) {
+        const maxBottom = Math.max(barRect.bottom, statusRect.bottom);
+        topOffset = Math.ceil(maxBottom + safeGap);
+      }
+    }
+
+    mainRootElement.style.marginTop = String(topOffset) + "px";
+    return;
+  }
+
+  if (navBarCardElement.classList.contains("nav-bottom")) {
+    mainRootElement.style.marginBottom = String(barHeight + safeGap) + "px";
+    return;
+  }
+
+  if (navBarCardElement.classList.contains("nav-left")) {
+    mainRootElement.style.marginLeft = String(barWidth + safeGap) + "px";
+    return;
+  }
+
+  if (navBarCardElement.classList.contains("nav-right")) {
+    mainRootElement.style.marginRight = String(barWidth + safeGap) + "px";
+  }
+}
 
 // 这个函数根据当前偏移更新“每日日报”的左右按钮状态。
 function renderDailyReportSwitchButtons() {
@@ -755,6 +859,33 @@ if (noteInputElement) {
 if (openFloatingWindowButtonElement) {
   openFloatingWindowButtonElement.addEventListener("click", openFloatingWindowFromServer);
 }
+
+// 下拉框一变化就立即切换位置，不需要再点按钮。
+if (navPositionSelectElement) {
+  navPositionSelectElement.addEventListener("change", function () {
+    applyNavPosition(navPositionSelectElement.value);
+  });
+
+  // 页面启动时先应用一次默认位置。
+  applyNavPosition(navPositionSelectElement.value);
+}
+
+// 点击“设置”按钮时，打开设置弹窗。
+if (taskbarSettingsButtonElement) {
+  taskbarSettingsButtonElement.addEventListener("click", function () {
+    setSettingsPanelVisible(true);
+  });
+}
+
+// 点击“关闭”按钮时，关闭设置弹窗。
+if (closeSettingsPanelButtonElement) {
+  closeSettingsPanelButtonElement.addEventListener("click", function () {
+    setSettingsPanelVisible(false);
+  });
+}
+
+// 窗口尺寸变化时重新计算一次，保证不遮挡。
+window.addEventListener("resize", syncMainRootOffset);
 
 // ---------------------------
 // 通知功能（只做“接线”，逻辑在 notify.js）
