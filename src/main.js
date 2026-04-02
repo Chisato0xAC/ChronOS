@@ -23,8 +23,12 @@ const undoButtonElement = document.getElementById("undoButton");
 
 // 这行代码拿到历史记录显示区域。
 const historyListElement = document.getElementById("historyList");
-// 这行代码拿到“今日日报（简略）”显示区域。
+// 这行代码拿到“每日日报（简略）”显示区域。
 const dailyReportSimpleElement = document.getElementById("dailyReportSimple");
+// 这行代码拿到“每日日报-前一天”按钮。
+const dailyReportPrevDayButtonElement = document.getElementById("dailyReportPrevDayButton");
+// 这行代码拿到“每日日报-后一天”按钮。
+const dailyReportNextDayButtonElement = document.getElementById("dailyReportNextDayButton");
 // 这行代码拿到“服务状态”显示区域。
 const serviceStatusElement = document.getElementById("serviceStatus");
 // 这行代码拿到右侧便签输入框。
@@ -55,6 +59,20 @@ let notifyPendingTasks = [];
 let notifyTaskInFlightMap = {};
 // 这个变量保存“通知任务轮询”定时器（无任务时会停掉）。
 let notifyTasksPollTimer = null;
+// 这个变量保存“每日日报”当前查看的日期偏移：0=今天，-1=昨天。
+let dailyReportDayOffset = 0;
+
+// 这个函数根据当前偏移更新“每日日报”的左右按钮状态。
+function renderDailyReportSwitchButtons() {
+  if (dailyReportPrevDayButtonElement) {
+    dailyReportPrevDayButtonElement.disabled = false;
+  }
+
+  if (dailyReportNextDayButtonElement) {
+    // 0 代表今天，不允许再往“未来日期”切换。
+    dailyReportNextDayButtonElement.disabled = dailyReportDayOffset >= 0;
+  }
+}
 
 // 这个函数按“是否有待触发任务”决定是否轮询后端。
 function syncNotifyTasksPollingByPendingCount() {
@@ -287,7 +305,7 @@ function formatSignedNumber(value, fixedDigits) {
   return text;
 }
 
-// 这个函数把“今日日报（简略）”渲染到首页。
+// 这个函数把“每日日报（简略）”渲染到首页。
 function renderDailyReportSimple(data) {
   if (!dailyReportSimpleElement) {
     return;
@@ -303,7 +321,6 @@ function renderDailyReportSimple(data) {
   const gpChangeCount = Math.floor(Number(data.gp_change_count) || 0);
   const dpDeltaTotal = Math.floor(Number(data.dp_delta_total) || 0);
   const gpDeltaTotal = Number(data.gp_delta_total) || 0;
-  const latestChangeText = String(data.latest_change_text || "").trim();
   let reportDate = String(data.report_date || "").trim();
   if (reportDate === "") {
     const dayStartText = String(data.day_start_text || "").trim();
@@ -313,26 +330,30 @@ function renderDailyReportSimple(data) {
   const lines = [];
   lines.push("统计日期：" + reportDate);
   lines.push("有效变更条数：" + String(totalEvents));
-  lines.push("DP 变更次数：" + String(dpChangeCount) + "，合计：" + formatSignedNumber(dpDeltaTotal));
-  lines.push("GP 变更次数：" + String(gpChangeCount) + "，合计：" + formatSignedNumber(gpDeltaTotal, 2));
 
-  if (latestChangeText !== "") {
-    lines.push("最后一次变更：" + latestChangeText);
-  } else {
-    lines.push("最后一次变更：无");
+  // 没有变更的项目不显示，只展示当天实际发生变更的条目。
+  if (dpChangeCount > 0) {
+    lines.push("DP 变更次数：" + String(dpChangeCount) + "，合计：" + formatSignedNumber(dpDeltaTotal));
+  }
+  if (gpChangeCount > 0) {
+    lines.push("GP 变更次数：" + String(gpChangeCount) + "，合计：" + formatSignedNumber(gpDeltaTotal, 2));
+  }
+
+  if (dpChangeCount <= 0 && gpChangeCount <= 0) {
+    lines.push("（当天没有 DP/GP 变更）");
   }
 
   dailyReportSimpleElement.textContent = lines.join("\n");
 }
 
-// 这个函数从后端读取“今日日报（简略）”。
+// 这个函数从后端读取“每日日报（简略）”。
 async function loadDailyReportSimpleFromServer() {
   if (!dailyReportSimpleElement) {
     return;
   }
 
   try {
-    const response = await fetch("/api/daily-report-simple", {
+    const response = await fetch("/api/daily-report-simple?day_offset=" + String(dailyReportDayOffset), {
       cache: "no-store",
     });
 
@@ -346,6 +367,26 @@ async function loadDailyReportSimpleFromServer() {
   } catch (error) {
     dailyReportSimpleElement.textContent = "（日报读取失败）";
   }
+}
+
+// 这个函数切换到“前一天”的每日日报。
+function showPreviousDailyReportDay() {
+  dailyReportDayOffset = dailyReportDayOffset - 1;
+  renderDailyReportSwitchButtons();
+  loadDailyReportSimpleFromServer();
+}
+
+// 这个函数切换到“后一天”的每日日报。
+function showNextDailyReportDay() {
+  // 不允许切到未来日期（今天之后）。
+  if (dailyReportDayOffset >= 0) {
+    renderDailyReportSwitchButtons();
+    return;
+  }
+
+  dailyReportDayOffset = dailyReportDayOffset + 1;
+  renderDailyReportSwitchButtons();
+  loadDailyReportSimpleFromServer();
 }
 
 // 这个函数从后端读取历史记录。
@@ -612,6 +653,7 @@ async function undoLastChange() {
 // 这行执行读取 JSON 并更新页面的流程。
 loadStateFromFile();
 loadHistoryFromServer();
+renderDailyReportSwitchButtons();
 loadDailyReportSimpleFromServer();
 loadNoteFromServer();
 startStateEventStream();
@@ -693,6 +735,16 @@ dpInputElement.addEventListener("keydown", function (event) {
 
 // 点击撤销按钮时，请求后端撤销。
 undoButtonElement.addEventListener("click", undoLastChange);
+
+// 点击“日报左箭头”时，切到前一天。
+if (dailyReportPrevDayButtonElement) {
+  dailyReportPrevDayButtonElement.addEventListener("click", showPreviousDailyReportDay);
+}
+
+// 点击“日报右箭头”时，切到后一天。
+if (dailyReportNextDayButtonElement) {
+  dailyReportNextDayButtonElement.addEventListener("click", showNextDailyReportDay);
+}
 
 // 输入便签时，自动触发保存。
 if (noteInputElement) {

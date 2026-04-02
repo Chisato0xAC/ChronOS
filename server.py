@@ -1130,12 +1130,24 @@ def get_day_window_by_boundary_ts(now_ts: int) -> tuple[int, int]:
     return int(day_start_dt.timestamp()), int(day_end_dt.timestamp())
 
 
-def build_daily_report_simple() -> dict:
-    # 生成“今日日报（简略）”：
-    # - 只统计当前换日窗口内的“仍有效”的状态变更
+def build_daily_report_simple(day_offset: int = 0) -> dict:
+    # 生成“每日日报（简略）”：
+    # - 支持按 day_offset 查看任意一天（0=当前日，-1=前一天）
+    # - 只统计目标换日窗口内的“仍有效”的状态变更
     # - undo 记录本身不计入日报
     now_ts = int(time.time())
     day_start_ts, day_end_ts = get_day_window_by_boundary_ts(now_ts)
+
+    safe_day_offset = 0
+    try:
+        safe_day_offset = int(day_offset)
+    except Exception:
+        safe_day_offset = 0
+
+    # 将统计窗口整体平移到目标日期。
+    if safe_day_offset != 0:
+        day_start_ts = int(day_start_ts + safe_day_offset * 86400)
+        day_end_ts = int(day_end_ts + safe_day_offset * 86400)
 
     result = {
         "ok": True,
@@ -1153,7 +1165,6 @@ def build_daily_report_simple() -> dict:
         "gp_change_count": 0,
         "dp_delta_total": 0,
         "gp_delta_total": 0.0,
-        "latest_change_text": "",
     }
 
     if not STATE_HISTORY_FILE.exists():
@@ -1190,9 +1201,7 @@ def build_daily_report_simple() -> dict:
         if isinstance(undo_of_ts, int):
             undone_ts.add(undo_of_ts)
 
-    latest_ts = 0
-
-    # 再按时间正序统计，方便得到“最后一次变更时间”。
+    # 再按时间正序统计，方便输出稳定顺序。
     for i in range(len(lines)):
         raw = lines[i].strip()
         if raw == "":
@@ -1251,10 +1260,6 @@ def build_daily_report_simple() -> dict:
                 result["gp_delta_total"] = float(result["gp_delta_total"]) + float(
                     to_number - from_number
                 )
-
-        if ts >= latest_ts:
-            latest_ts = ts
-            result["latest_change_text"] = str(record.get("text", ""))
 
     result["gp_delta_total"] = round(float(result["gp_delta_total"]), 2)
     return result
@@ -1644,7 +1649,21 @@ class SaveDpHandler(BaseHTTPRequestHandler):
         # /api/daily-report-simple：返回“今日日报（简略）”。
         if request_path == "/api/daily-report-simple":
             try:
-                payload = build_daily_report_simple()
+                day_offset = 0
+                if "?" in self.path:
+                    query = self.path.split("?", 1)[1]
+                    pairs = query.split("&")
+                    for pair in pairs:
+                        if not pair.startswith("day_offset="):
+                            continue
+                        raw_value = pair.split("=", 1)[1]
+                        try:
+                            day_offset = int(raw_value)
+                        except Exception:
+                            day_offset = 0
+                        break
+
+                payload = build_daily_report_simple(day_offset)
                 response_body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json; charset=utf-8")

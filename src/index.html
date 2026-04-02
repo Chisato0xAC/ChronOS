@@ -105,6 +105,25 @@
       font-weight: bold;
     }
 
+    .daily-report-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    .daily-report-header h3 {
+      margin: 0;
+      flex: 1;
+      text-align: center;
+    }
+
+    .daily-report-switch-button {
+      width: 28px;
+      height: 28px;
+      margin-top: 0;
+    }
+
     @media (max-width: 900px) {
       .main-grid {
         grid-template-columns: 1fr;
@@ -169,7 +188,11 @@
         </article>
 
         <article aria-labelledby="dailyReportSimpleTitle">
-          <h3 id="dailyReportSimpleTitle">今日日报（简略）</h3>
+          <div class="daily-report-header">
+            <button id="dailyReportPrevDayButton" class="daily-report-switch-button" type="button" aria-label="查看前一天">&lt;</button>
+            <h3 id="dailyReportSimpleTitle">每日日报（简略）</h3>
+            <button id="dailyReportNextDayButton" class="daily-report-switch-button" type="button" aria-label="查看后一天">&gt;</button>
+          </div>
           <pre id="dailyReportSimple">（正在读取）</pre>
         </article>
 
