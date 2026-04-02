@@ -1,7 +1,7 @@
 Managed Children (Server Scheduler)
 
 - 这个文件说明：`server.py` 如何托管子进程。
-- 子进程清单在 `tools/managed_children.json`。
+- 子进程清单在 `config/managed_children.json`。
 - `server.py` 启动时会读取清单并启动子进程。
 - `server.py` 退出时会停止全部托管子进程。
 
@@ -12,7 +12,7 @@ Managed Children (Server Scheduler)
   "children": [
     {
       "name": "process_watch",
-      "cmd": ["python", "-X", "utf8", "-u", "tools/process_watch.py"],
+      "cmd": ["python", "-X", "utf8", "-u", "src/monitor/process_watch.py"],
       "cwd": ".",
       "auto_restart": true
     }
@@ -30,6 +30,6 @@ Managed Children (Server Scheduler)
 
 ## 新增一个子进程（最小步骤）
 
-1. 先在 `tools/` 新建脚本。
-2. 再在 `tools/managed_children.json` 的 `children` 里新增一项。
+1. 先在项目内新建脚本（建议放到对应模块目录）。
+2. 再在 `config/managed_children.json` 的 `children` 里新增一项。
 3. 重启 `server.py`，让主调度器重新加载配置。
