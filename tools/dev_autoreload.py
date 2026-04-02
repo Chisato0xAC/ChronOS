@@ -1,5 +1,6 @@
 import json
 import os
+import signal
 import subprocess
 import sys
 import threading
@@ -18,6 +19,8 @@ PY_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 sys.pycache_prefix = str(PY_CACHE_DIR)
 os.environ["PYTHONPYCACHEPREFIX"] = str(PY_CACHE_DIR)
 LOG_DIR = PROJECT_ROOT / "logs"
+DATA_DIR = PROJECT_ROOT / "data"
+RELOADER_LOCK_FILE = DATA_DIR / "dev_autoreload.lock"
 WATCH_CONFIG_FILE = PROJECT_ROOT / "config" / "reload_watch.json"
 
 # 默认：这些类型的文件改动后，会触发自动重启。
@@ -143,6 +146,76 @@ def log_error(message: str) -> None:
     emit_line(f"[{now_text()}] [ERROR] [RELOADER] {message}", to_stderr=True)
 
 
+def is_process_alive(pid: int) -> bool:
+    # 判断进程是否仍在运行。
+    if int(pid) <= 0:
+        return False
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except PermissionError:
+        return True
+    except Exception:
+        return False
+
+
+def try_acquire_reloader_lock() -> bool:
+    # 自动重启器单实例锁：避免重复启动多个 reloader。
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+    if RELOADER_LOCK_FILE.exists():
+        try:
+            raw = RELOADER_LOCK_FILE.read_text(encoding="utf-8")
+            info = json.loads(raw)
+            lock_pid = int(info.get("pid", 0) or 0)
+        except Exception:
+            lock_pid = 0
+
+        if lock_pid > 0 and is_process_alive(lock_pid):
+            return False
+
+        # 脏锁清理：旧进程已退出时允许新实例接管。
+        try:
+            RELOADER_LOCK_FILE.unlink()
+            log("检测到旧的自动重启器锁，已自动清理")
+        except Exception:
+            return False
+
+    try:
+        fd = os.open(
+            str(RELOADER_LOCK_FILE),
+            os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+        )
+        os.write(
+            fd,
+            json.dumps(
+                {
+                    "pid": os.getpid(),
+                    "created_ts": int(time.time()),
+                    "created_text": now_text(),
+                },
+                ensure_ascii=False,
+                indent=2,
+            ).encode("utf-8"),
+        )
+        os.close(fd)
+        return True
+    except FileExistsError:
+        return False
+    except Exception as e:
+        log_error(f"创建自动重启器锁失败: {e}")
+        return False
+
+
+def release_reloader_lock() -> None:
+    # 退出时释放自动重启器锁。
+    try:
+        if RELOADER_LOCK_FILE.exists():
+            RELOADER_LOCK_FILE.unlink()
+    except Exception:
+        return
+
+
 def should_abort_restart(restart_times: list, reason: str) -> bool:
     # 重启风暴保护：如果在短时间内重启过多，就直接退出。
     now_ts = time.time()
@@ -227,6 +300,11 @@ def start_server() -> subprocess.Popen:
     # 启动主服务（server.py）。
     cmd = [sys.executable, "-X", "utf8", "-u", "server.py"]
     log("启动 server.py")
+    create_flags = 0
+    if os.name == "nt":
+        # Windows：创建独立进程组，便于后续发送 CTRL_BREAK 做优雅停止。
+        create_flags = subprocess.CREATE_NEW_PROCESS_GROUP
+
     proc = subprocess.Popen(
         cmd,
         cwd=str(PROJECT_ROOT),
@@ -235,6 +313,7 @@ def start_server() -> subprocess.Popen:
         text=True,
         encoding="utf-8",
         errors="replace",
+        creationflags=create_flags,
     )
 
     if proc.stdout is not None:
@@ -258,14 +337,56 @@ def stop_server(proc: subprocess.Popen) -> None:
     if proc.poll() is not None:
         return
 
-    proc.terminate()
     try:
+        # 优先优雅停止：让 server.py 有机会执行 finally（清理托管子进程）。
+        if os.name == "nt":
+            proc.send_signal(signal.CTRL_BREAK_EVENT)
+        else:
+            proc.terminate()
         proc.wait(timeout=5)
         log("server.py 已停止")
     except subprocess.TimeoutExpired:
+        # 超时兜底：强制结束整棵进程树，防止残留子进程。
+        if os.name == "nt":
+            subprocess.run(
+                ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+            log("server.py 进程树已强制停止")
+            return
+
         proc.kill()
         proc.wait(timeout=5)
         log("server.py 已强制停止")
+
+
+def has_server_lock_conflict_error() -> bool:
+    # 检查今天日志中是否出现“已有主服务在运行”的冲突提示。
+    # 用于识别：重启后新 server 因锁冲突立即退出，此时不应继续风暴重试。
+    try:
+        log_file = get_daily_log_file()
+        if not log_file.exists():
+            return False
+
+        lines = log_file.read_text(encoding="utf-8", errors="replace").splitlines()
+        if len(lines) == 0:
+            return False
+
+        # 只检查尾部窗口，避免扫描整天日志太重。
+        tail = lines[-120:]
+        for line in reversed(tail):
+            text = str(line)
+            if (
+                "[ERROR] [SERVER] 检测到已有 ChronOS 主服务在运行，本次启动已取消"
+                in text
+            ):
+                return True
+        return False
+    except Exception:
+        return False
 
 
 def main() -> int:
@@ -273,6 +394,10 @@ def main() -> int:
     # 逻辑：先启动一次 server，再每秒轮询文件变化，变化就重启。
     restart_count = 0
     print_boundary("自动重启器已启动")
+
+    if not try_acquire_reloader_lock():
+        log_error("检测到已有自动重启器在运行，本次启动已取消")
+        return 1
 
     # 启动时先加载一次监听配置文件。
     load_watch_config()
@@ -288,6 +413,15 @@ def main() -> int:
                 log_error(
                     f"server.py 已退出，退出码={server_proc.returncode}，准备重启"
                 )
+
+                # 特判：如果是“主服务锁冲突”导致退出，就停止自动重试。
+                # 否则会出现无意义的连续重启风暴。
+                if has_server_lock_conflict_error():
+                    log_error(
+                        "检测到主服务锁冲突，自动重启器将停止重试，请先清理重复实例"
+                    )
+                    return 1
+
                 if should_abort_restart(restart_times, "服务意外退出"):
                     stop_server(server_proc)
                     return 1
@@ -333,6 +467,8 @@ def main() -> int:
         log_error(f"自动重启器异常: {e}")
         stop_server(server_proc)
         return 1
+    finally:
+        release_reloader_lock()
 
 
 if __name__ == "__main__":
