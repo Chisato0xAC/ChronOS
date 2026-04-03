@@ -109,6 +109,8 @@ let latestDailyReportData = null;
 let cuteDevToastTimer = null;
 // 这个标记表示：后台重连时先记住“待刷新”，等页面回到前台再刷新。
 let pendingReloadWhenVisible = false;
+// 这个定时器用于定时刷新周视图里的“当前时间横条”。
+let agendaNowLineTimer = null;
 
 // 这个函数根据面板开关状态，更新任务栏按钮高亮。
 function refreshTaskbarActiveButtons() {
@@ -749,6 +751,72 @@ function getAgendaWeekDates() {
   return dates;
 }
 
+// 这个函数返回今天在本周里的位置：周一=0，周日=6。
+function getTodayWeekColumnIndex() {
+  const today = new Date();
+  const weekDay = today.getDay();
+  return weekDay === 0 ? 6 : weekDay - 1;
+}
+
+// 这个函数把“当前时间横条”放到今天这一列的正确高度。
+function updateAgendaNowLinePosition() {
+  if (!agendaWeekGridElement) {
+    return;
+  }
+
+  const agendaBodyElement = agendaWeekGridElement.querySelector(".agenda-week-body");
+  const agendaLineElement = document.getElementById("agendaNowLine");
+  if (!agendaBodyElement || !agendaLineElement) {
+    return;
+  }
+
+  const todayColumnIndex = getTodayWeekColumnIndex();
+  const firstCellElement = agendaBodyElement.querySelector(
+    '.agenda-week-cell[data-day-index="' + String(todayColumnIndex) + '"][data-hour="0"]'
+  );
+  const lastCellElement = agendaBodyElement.querySelector(
+    '.agenda-week-cell[data-day-index="' + String(todayColumnIndex) + '"][data-hour="23"]'
+  );
+
+  if (!firstCellElement || !lastCellElement) {
+    agendaLineElement.hidden = true;
+    return;
+  }
+
+  const bodyRect = agendaBodyElement.getBoundingClientRect();
+  const firstCellRect = firstCellElement.getBoundingClientRect();
+  const lastCellRect = lastCellElement.getBoundingClientRect();
+  const now = new Date();
+  const totalMinutes = now.getHours() * 60 + now.getMinutes();
+  const rowHeight = firstCellRect.height;
+  const topOffset = (firstCellRect.top - bodyRect.top) + (totalMinutes / 60) * rowHeight;
+  const leftOffset = firstCellRect.left - bodyRect.left;
+  const lineWidth = firstCellRect.width;
+
+  agendaLineElement.hidden = false;
+  agendaLineElement.style.top = String(topOffset) + "px";
+  agendaLineElement.style.left = String(leftOffset) + "px";
+  agendaLineElement.style.width = String(Math.max(0, lineWidth)) + "px";
+
+  const lineBottom = topOffset + 2;
+  const visibleTop = agendaWeekGridElement.scrollTop;
+  const visibleBottom = visibleTop + agendaWeekGridElement.clientHeight;
+  if (lineBottom < visibleTop || topOffset > visibleBottom) {
+    agendaWeekGridElement.scrollTop = Math.max(0, topOffset - agendaWeekGridElement.clientHeight / 2);
+  }
+}
+
+// 这个函数启动“当前时间横条”的定时刷新。
+function startAgendaNowLineTimer() {
+  updateAgendaNowLinePosition();
+
+  if (agendaNowLineTimer !== null) {
+    window.clearInterval(agendaNowLineTimer);
+  }
+
+  agendaNowLineTimer = window.setInterval(updateAgendaNowLinePosition, 60000);
+}
+
 // 这个函数把首页的周视图骨架渲染出来：上面是日期，左边是时间。
 function renderAgendaWeekView() {
   if (!agendaWeekGridElement) {
@@ -777,19 +845,35 @@ function renderAgendaWeekView() {
   }
 
   html = html + '</div>';
+  html = html + '<div class="agenda-week-body">';
 
   for (let rowIndex = 0; rowIndex < hourLabels.length; rowIndex = rowIndex + 1) {
     html = html + '<div class="agenda-week-row">';
     html = html + '<div class="agenda-week-time">' + hourLabels[rowIndex] + '</div>';
 
     for (let colIndex = 0; colIndex < 7; colIndex = colIndex + 1) {
-      html = html + '<div class="agenda-week-cell"></div>';
+      let cellClassName = 'agenda-week-cell';
+      if (colIndex === getTodayWeekColumnIndex()) {
+        cellClassName = cellClassName + ' agenda-week-today';
+      }
+      html = html
+        + '<div class="'
+        + cellClassName
+        + '" data-day-index="'
+        + String(colIndex)
+        + '" data-hour="'
+        + String(rowIndex)
+        + '"></div>';
     }
 
     html = html + '</div>';
   }
 
+  html = html + '<div id="agendaNowLine" hidden></div>';
+  html = html + '</div>';
+
   agendaWeekGridElement.innerHTML = html;
+  startAgendaNowLineTimer();
 }
 
 // 这个函数切换到“前一天”的每日日报。
@@ -1274,6 +1358,7 @@ if (closeSettingsPanelButtonElement) {
 
 // 窗口尺寸变化时重新计算一次，保证不遮挡。
 window.addEventListener("resize", syncMainRootOffset);
+window.addEventListener("resize", updateAgendaNowLinePosition);
 
 // 点击任务栏和弹窗外部区域时，自动关闭任务栏弹窗。
 document.addEventListener("click", function (event) {

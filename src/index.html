@@ -427,6 +427,10 @@
       overflow: auto;
     }
 
+    .agenda-week-body {
+      position: relative;
+    }
+
     .agenda-week-header,
     .agenda-week-row {
       display: grid;
@@ -470,6 +474,23 @@
     .agenda-week-cell {
       min-height: 48px;
       background: #fffdf7;
+    }
+
+    .agenda-week-cell.agenda-week-today {
+      background: #fff7e8;
+    }
+
+    #agendaNowLine {
+      position: absolute;
+      height: 2px;
+      background: #d14343;
+      box-shadow: 0 0 0 1px rgba(209, 67, 67, 0.15);
+      pointer-events: none;
+      z-index: 2;
+    }
+
+    #agendaNowLine[hidden] {
+      display: none;
     }
 
     .agenda-week-row:last-child .agenda-week-time,
