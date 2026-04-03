@@ -116,16 +116,12 @@ let agendaNowLineTimer = null;
 // 这个数组保存周视图里的进程监控会话。
 let agendaProcessSessions = [];
 // 同一天里，相同进程如果前后间隔不超过这个秒数，就合并成一个块。
-const AGENDA_SESSION_MERGE_GAP_SECONDS = 5 * 60;
+const AGENDA_SESSION_MERGE_GAP_SECONDS = 8 * 60;
 
-// 这个函数判断页面现在是否真的处于“可安全立刻刷新”的前台状态。
-// 只有标签页可见，且文档已经拿到焦点时，才立刻刷新。
+// 这个函数判断页面现在是否处于“可立刻刷新”的可见状态。
+// 这里只要求标签页可见，避免浏览器焦点判断过严导致该刷没刷。
 function isSafeToReloadNow() {
   if (document.visibilityState !== "visible") {
-    return false;
-  }
-
-  if (typeof document.hasFocus === "function" && document.hasFocus() !== true) {
     return false;
   }
 
@@ -842,10 +838,58 @@ function formatAgendaShortTime(dateValue) {
   return padTwoDigits(dateValue.getHours()) + ":" + padTwoDigits(dateValue.getMinutes());
 }
 
+// 这个函数先把原始会话按“同进程 + 短间隔”合并。
+function mergeAgendaProcessSessions(rawSessions) {
+  if (!Array.isArray(rawSessions) || rawSessions.length === 0) {
+    return [];
+  }
+
+  const sortedSessions = rawSessions.slice().sort(function (a, b) {
+    const processDiff = String(a.process_name || "").localeCompare(String(b.process_name || ""));
+    if (processDiff !== 0) {
+      return processDiff;
+    }
+
+    return Number(a.start_ts || 0) - Number(b.start_ts || 0);
+  });
+
+  const merged = [];
+  for (let i = 0; i < sortedSessions.length; i = i + 1) {
+    const currentSession = sortedSessions[i] || {};
+    const lastSession = merged.length > 0 ? merged[merged.length - 1] : null;
+
+    if (!lastSession) {
+      merged.push({
+        process_name: String(currentSession.process_name || ""),
+        start_ts: Number(currentSession.start_ts || 0),
+        end_ts: Number(currentSession.end_ts || 0),
+      });
+      continue;
+    }
+
+    const isSameProcess = String(lastSession.process_name || "") === String(currentSession.process_name || "");
+    const gapSeconds = Number(currentSession.start_ts || 0) - Number(lastSession.end_ts || 0);
+
+    if (isSameProcess && gapSeconds >= 0 && gapSeconds <= AGENDA_SESSION_MERGE_GAP_SECONDS) {
+      lastSession.end_ts = Math.max(Number(lastSession.end_ts || 0), Number(currentSession.end_ts || 0));
+      continue;
+    }
+
+    merged.push({
+      process_name: String(currentSession.process_name || ""),
+      start_ts: Number(currentSession.start_ts || 0),
+      end_ts: Number(currentSession.end_ts || 0),
+    });
+  }
+
+  return merged;
+}
+
 // 这个函数把一条会话按“天”拆成多段，方便周视图逐列绘制。
 function splitAgendaSessionByDay(startTs, endTs, weekStartTs) {
   const segments = [];
-  let currentStartTs = Math.floor(Number(startTs) || 0);
+  const originalStartTs = Math.floor(Number(startTs) || 0);
+  let currentStartTs = originalStartTs;
   const safeEndTs = Math.floor(Number(endTs) || 0);
 
   while (currentStartTs < safeEndTs) {
@@ -869,57 +913,17 @@ function splitAgendaSessionByDay(startTs, endTs, weekStartTs) {
       dayIndex: dayIndex,
       startTs: currentStartTs,
       endTs: segmentEndTs,
+      hoverStartTs: originalStartTs,
+      hoverEndTs: safeEndTs,
+      originalStartTs: originalStartTs,
+      originalEndTs: safeEndTs,
+      sourceKey: String(originalStartTs) + "_" + String(safeEndTs),
     });
 
     currentStartTs = segmentEndTs;
   }
 
   return segments;
-}
-
-// 这个函数把“同一天、同进程、间隔很短”的小段先合并，减少碎块。
-function mergeAgendaSessionSegments(rawSegments) {
-  if (!Array.isArray(rawSegments) || rawSegments.length === 0) {
-    return [];
-  }
-
-  const sortedSegments = rawSegments.slice().sort(function (a, b) {
-    const dayDiff = Number(a.dayIndex || 0) - Number(b.dayIndex || 0);
-    if (dayDiff !== 0) {
-      return dayDiff;
-    }
-
-    const processDiff = String(a.process_name || "").localeCompare(String(b.process_name || ""));
-    if (processDiff !== 0) {
-      return processDiff;
-    }
-
-    return Number(a.startTs || 0) - Number(b.startTs || 0);
-  });
-
-  const merged = [];
-  for (let i = 0; i < sortedSegments.length; i = i + 1) {
-    const currentSegment = sortedSegments[i] || {};
-    const lastSegment = merged.length > 0 ? merged[merged.length - 1] : null;
-
-    if (!lastSegment) {
-      merged.push(currentSegment);
-      continue;
-    }
-
-    const isSameDay = Number(lastSegment.dayIndex || -1) === Number(currentSegment.dayIndex || -2);
-    const isSameProcess = String(lastSegment.process_name || "") === String(currentSegment.process_name || "");
-    const gapSeconds = Number(currentSegment.startTs || 0) - Number(lastSegment.endTs || 0);
-
-    if (isSameDay && isSameProcess && gapSeconds >= 0 && gapSeconds <= AGENDA_SESSION_MERGE_GAP_SECONDS) {
-      lastSegment.endTs = Math.max(Number(lastSegment.endTs || 0), Number(currentSegment.endTs || 0));
-      continue;
-    }
-
-    merged.push(currentSegment);
-  }
-
-  return merged;
 }
 
 // 这个函数把进程监控会话画到周视图里。
@@ -946,16 +950,14 @@ function renderAgendaProcessSessions() {
   const layerElement = document.createElement("div");
   layerElement.className = "agenda-week-session-layer";
 
-  const rowHeight = firstCellElement.getBoundingClientRect().height;
-  const columnWidth = firstCellElement.getBoundingClientRect().width;
-  const firstCellOffsetTop = firstCellElement.offsetTop;
-  const firstCellOffsetLeft = firstCellElement.offsetLeft;
+  const agendaBodyRect = agendaBodyElement.getBoundingClientRect();
   const weekStartDate = getAgendaWeekStartDate();
   const weekStartTs = Math.floor(weekStartDate.getTime() / 1000);
+  const mergedSessions = mergeAgendaProcessSessions(agendaProcessSessions);
   const rawSegments = [];
 
-  for (let i = 0; i < agendaProcessSessions.length; i = i + 1) {
-    const session = agendaProcessSessions[i] || {};
+  for (let i = 0; i < mergedSessions.length; i = i + 1) {
+    const session = mergedSessions[i] || {};
     const startTs = Number(session.start_ts || 0);
     const endTs = Number(session.end_ts || 0);
     if (Number.isNaN(startTs) || Number.isNaN(endTs) || endTs <= startTs) {
@@ -969,17 +971,23 @@ function renderAgendaProcessSessions() {
         dayIndex: Number(segment.dayIndex),
         startTs: Number(segment.startTs || 0),
         endTs: Number(segment.endTs || 0),
+        hoverStartTs: Number(segment.hoverStartTs || segment.startTs || 0),
+        hoverEndTs: Number(segment.hoverEndTs || segment.endTs || 0),
+        originalStartTs: Number(segment.originalStartTs || 0),
+        originalEndTs: Number(segment.originalEndTs || 0),
+        sourceKey: String(segment.sourceKey || ""),
         process_name: String(session.process_name || ""),
       });
     }
   }
 
-  const mergedSegments = mergeAgendaSessionSegments(rawSegments);
-  for (let i = 0; i < mergedSegments.length; i = i + 1) {
-    const segment = mergedSegments[i] || {};
+  for (let i = 0; i < rawSegments.length; i = i + 1) {
+    const segment = rawSegments[i] || {};
     const dayIndex = Number(segment.dayIndex);
     const segmentStartTs = Number(segment.startTs || 0);
     const segmentEndTs = Number(segment.endTs || 0);
+    const hoverStartTs = Number(segment.hoverStartTs || segmentStartTs || 0);
+    const hoverEndTs = Number(segment.hoverEndTs || segmentEndTs || 0);
     if (Number.isNaN(dayIndex) || dayIndex < 0 || dayIndex > 6) {
       continue;
     }
@@ -989,16 +997,40 @@ function renderAgendaProcessSessions() {
 
     const segmentStartDate = new Date(segmentStartTs * 1000);
     const segmentEndDate = new Date(segmentEndTs * 1000);
+    const hoverStartDate = new Date(hoverStartTs * 1000);
+    const hoverEndDate = new Date(hoverEndTs * 1000);
     const startMinutes = segmentStartDate.getHours() * 60 + segmentStartDate.getMinutes();
     let endMinutes = segmentEndDate.getHours() * 60 + segmentEndDate.getMinutes();
     if (segmentEndDate.getHours() === 0 && segmentEndDate.getMinutes() === 0 && segmentEndTs > segmentStartTs) {
       endMinutes = 24 * 60;
     }
 
-    const top = firstCellOffsetTop + (startMinutes / 60) * rowHeight;
-    const left = firstCellOffsetLeft + dayIndex * columnWidth + 2;
-    const height = Math.max(8, ((endMinutes - startMinutes) / 60) * rowHeight);
-    const width = Math.max(8, columnWidth - 4);
+    const startHour = segmentStartDate.getHours();
+    const endHour = endMinutes >= 24 * 60 ? 23 : segmentEndDate.getHours();
+    const startCellElement = agendaBodyElement.querySelector(
+      '.agenda-week-cell[data-day-index="' + String(dayIndex) + '"][data-hour="' + String(startHour) + '"]'
+    );
+    const endCellElement = agendaBodyElement.querySelector(
+      '.agenda-week-cell[data-day-index="' + String(dayIndex) + '"][data-hour="' + String(endHour) + '"]'
+    );
+    if (!startCellElement || !endCellElement) {
+      continue;
+    }
+
+    const startCellRect = startCellElement.getBoundingClientRect();
+    const endCellRect = endCellElement.getBoundingClientRect();
+    const startRowHeight = startCellRect.height;
+    const endRowHeight = endCellRect.height;
+    const top = (startCellRect.top - agendaBodyRect.top) + ((startMinutes % 60) / 60) * startRowHeight;
+    let bottom = endCellRect.top - agendaBodyRect.top;
+    if (endMinutes >= 24 * 60) {
+      bottom = endCellRect.bottom - agendaBodyRect.top;
+    } else {
+      bottom = bottom + ((endMinutes % 60) / 60) * endRowHeight;
+    }
+    const left = startCellRect.left - agendaBodyRect.left;
+    const height = Math.max(8, bottom - top);
+    const width = Math.max(8, startCellRect.width - 2);
 
     const blockElement = document.createElement("div");
     blockElement.className = "agenda-week-session-block";
@@ -1007,8 +1039,7 @@ function renderAgendaProcessSessions() {
     blockElement.style.width = String(width) + "px";
     blockElement.style.height = String(height) + "px";
     blockElement.style.background = getAgendaSessionColor(segment.process_name);
-    blockElement.title = String(segment.process_name || "") + "\n" + formatAgendaShortTime(segmentStartDate) + " - " + formatAgendaShortTime(segmentEndDate);
-    blockElement.textContent = String(segment.process_name || "");
+    blockElement.title = String(segment.process_name || "") + "\n" + formatAgendaShortTime(hoverStartDate) + " - " + formatAgendaShortTime(hoverEndDate);
     layerElement.appendChild(blockElement);
   }
 

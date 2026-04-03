@@ -434,7 +434,6 @@
     .agenda-week-session-layer {
       position: absolute;
       inset: 0;
-      pointer-events: none;
       z-index: 1;
     }
 
@@ -489,15 +488,10 @@
 
     .agenda-week-session-block {
       position: absolute;
+      box-sizing: border-box;
       border: 1px solid rgba(0, 0, 0, 0.08);
       border-radius: 4px;
-      color: #1f2328;
-      font-size: 12px;
-      line-height: 1.2;
-      padding: 2px 4px;
-      overflow: hidden;
-      white-space: nowrap;
-      text-overflow: ellipsis;
+      cursor: pointer;
       opacity: 0.9;
     }
 
