@@ -111,6 +111,22 @@ let cuteDevToastTimer = null;
 let pendingReloadWhenVisible = false;
 // 这个定时器用于定时刷新周视图里的“当前时间横条”。
 let agendaNowLineTimer = null;
+// 这个数组保存周视图里的进程监控会话。
+let agendaProcessSessions = [];
+
+// 这个函数判断页面现在是否真的处于“可安全立刻刷新”的前台状态。
+// 只有标签页可见，且文档已经拿到焦点时，才立刻刷新。
+function isSafeToReloadNow() {
+  if (document.visibilityState !== "visible") {
+    return false;
+  }
+
+  if (typeof document.hasFocus === "function" && document.hasFocus() !== true) {
+    return false;
+  }
+
+  return true;
+}
 
 // 这个函数根据面板开关状态，更新任务栏按钮高亮。
 function refreshTaskbarActiveButtons() {
@@ -758,6 +774,125 @@ function getTodayWeekColumnIndex() {
   return weekDay === 0 ? 6 : weekDay - 1;
 }
 
+// 这个函数返回本周开始时间（周一 00:00）。
+function getAgendaWeekStartDate() {
+  const today = new Date();
+  const weekStart = new Date(today);
+  const weekDay = today.getDay();
+  const mondayOffset = weekDay === 0 ? -6 : 1 - weekDay;
+  weekStart.setHours(0, 0, 0, 0);
+  weekStart.setDate(today.getDate() + mondayOffset);
+  return weekStart;
+}
+
+// 这个函数给不同进程名分配固定颜色，方便肉眼区分。
+function getAgendaSessionColor(processName) {
+  const palette = ["#dbeafe", "#dcfce7", "#fef3c7", "#fce7f3", "#e9d5ff", "#fde68a"];
+  const name = String(processName || "");
+  let sum = 0;
+  for (let i = 0; i < name.length; i = i + 1) {
+    sum = sum + name.charCodeAt(i);
+  }
+  return palette[sum % palette.length];
+}
+
+// 这个函数把时间格式化成 HH:MM。
+function formatAgendaShortTime(dateValue) {
+  return padTwoDigits(dateValue.getHours()) + ":" + padTwoDigits(dateValue.getMinutes());
+}
+
+// 这个函数把进程监控会话画到周视图里。
+function renderAgendaProcessSessions() {
+  if (!agendaWeekGridElement) {
+    return;
+  }
+
+  const agendaBodyElement = agendaWeekGridElement.querySelector(".agenda-week-body");
+  if (!agendaBodyElement) {
+    return;
+  }
+
+  const oldLayerElement = agendaBodyElement.querySelector(".agenda-week-session-layer");
+  if (oldLayerElement) {
+    oldLayerElement.remove();
+  }
+
+  const firstCellElement = agendaBodyElement.querySelector('.agenda-week-cell[data-day-index="0"][data-hour="0"]');
+  if (!firstCellElement) {
+    return;
+  }
+
+  const layerElement = document.createElement("div");
+  layerElement.className = "agenda-week-session-layer";
+
+  const rowHeight = firstCellElement.getBoundingClientRect().height;
+  const columnWidth = firstCellElement.getBoundingClientRect().width;
+  const firstCellOffsetTop = firstCellElement.offsetTop;
+  const firstCellOffsetLeft = firstCellElement.offsetLeft;
+  const weekStartDate = getAgendaWeekStartDate();
+  const weekStartTs = Math.floor(weekStartDate.getTime() / 1000);
+
+  for (let i = 0; i < agendaProcessSessions.length; i = i + 1) {
+    const session = agendaProcessSessions[i] || {};
+    const startTs = Number(session.start_ts || 0);
+    const endTs = Number(session.end_ts || 0);
+    if (Number.isNaN(startTs) || Number.isNaN(endTs) || endTs <= startTs) {
+      continue;
+    }
+
+    const startDate = new Date(startTs * 1000);
+    const endDate = new Date(endTs * 1000);
+    const startDayIndex = Math.floor((startTs - weekStartTs) / 86400);
+    const endDayIndex = Math.floor((endTs - weekStartTs) / 86400);
+    if (startDayIndex < 0 || startDayIndex > 6) {
+      continue;
+    }
+
+    // 第一版先只画“同一天内结束”的会话，避免跨天块增加复杂度。
+    if (startDayIndex !== endDayIndex) {
+      continue;
+    }
+
+    const startMinutes = startDate.getHours() * 60 + startDate.getMinutes();
+    const endMinutes = endDate.getHours() * 60 + endDate.getMinutes();
+    const top = firstCellOffsetTop + (startMinutes / 60) * rowHeight;
+    const left = firstCellOffsetLeft + startDayIndex * columnWidth + 2;
+    const height = Math.max(8, ((endMinutes - startMinutes) / 60) * rowHeight);
+    const width = Math.max(8, columnWidth - 4);
+
+    const blockElement = document.createElement("div");
+    blockElement.className = "agenda-week-session-block";
+    blockElement.style.top = String(top) + "px";
+    blockElement.style.left = String(left) + "px";
+    blockElement.style.width = String(width) + "px";
+    blockElement.style.height = String(height) + "px";
+    blockElement.style.background = getAgendaSessionColor(session.process_name);
+    blockElement.title = String(session.process_name || "") + "\n" + formatAgendaShortTime(startDate) + " - " + formatAgendaShortTime(endDate);
+    blockElement.textContent = String(session.process_name || "");
+    layerElement.appendChild(blockElement);
+  }
+
+  agendaBodyElement.appendChild(layerElement);
+}
+
+// 这个函数从后端读取本周进程监控会话，并刷新周视图块。
+async function loadAgendaProcessSessionsFromServer() {
+  try {
+    const response = await fetch("/api/process-watch-week", {
+      cache: "no-store",
+    });
+    const result = await response.json();
+    if (!response.ok || !result || result.ok !== true) {
+      return;
+    }
+
+    agendaProcessSessions = Array.isArray(result.items) ? result.items : [];
+    renderAgendaProcessSessions();
+  } catch (error) {
+    // 读取失败时先忽略，不影响主页其他区域。
+  }
+}
+
 // 这个函数把“当前时间横条”放到今天这一列的正确高度。
 function updateAgendaNowLinePosition() {
   if (!agendaWeekGridElement) {
@@ -874,6 +1009,7 @@ function renderAgendaWeekView() {
 
   agendaWeekGridElement.innerHTML = html;
   startAgendaNowLineTimer();
+  renderAgendaProcessSessions();
 }
 
 // 这个函数切换到“前一天”的每日日报。
@@ -1071,7 +1207,7 @@ function startStateEventStream() {
   const source = new EventSource("/api/events");
 
   // 第一次连接只做标记；后续如果是“重连成功”，说明后端很可能重启过。
-  // 如果页面正在前台，就立刻整页刷新；如果页面在后台，就等用户切回前台时再刷新。
+  // 只有页面真的处于当前前台焦点时，才立刻整页刷新；否则等用户切回并聚焦后再刷新。
   source.onopen = function () {
     serviceStatusElement.textContent = "🟢 Connected";
 
@@ -1080,7 +1216,7 @@ function startStateEventStream() {
       return;
     }
 
-    if (document.visibilityState === "visible") {
+    if (isSafeToReloadNow()) {
       window.location.reload();
       return;
     }
@@ -1164,6 +1300,7 @@ async function undoLastChange() {
 
 // 这行执行读取 JSON 并更新页面的流程。
 renderAgendaWeekView();
+loadAgendaProcessSessionsFromServer();
 loadStateFromFile();
 loadHistoryFromServer();
 renderDailyReportSwitchButtons();
@@ -1359,6 +1496,7 @@ if (closeSettingsPanelButtonElement) {
 // 窗口尺寸变化时重新计算一次，保证不遮挡。
 window.addEventListener("resize", syncMainRootOffset);
 window.addEventListener("resize", updateAgendaNowLinePosition);
+window.addEventListener("resize", renderAgendaProcessSessions);
 
 // 点击任务栏和弹窗外部区域时，自动关闭任务栏弹窗。
 document.addEventListener("click", function (event) {
@@ -1698,17 +1836,31 @@ loadNotifyTasksFromServer();
 // 每秒更新一次，解决“预计通知时间静止”的问题。
 window.setInterval(tickNotifyTasks, 1000);
 
-// 页面回到前台时，如果之前有“待刷新”，就在这里补一次整页刷新。
+// 页面状态变化时，如果之前有“待刷新”，就在真正回到前台并拿到焦点后补一次整页刷新。
 // 没有待刷新时，只补拉通知任务，避免极端情况下错过 SSE 事件。
 document.addEventListener("visibilitychange", function () {
-  if (document.visibilityState === "visible") {
-    if (pendingReloadWhenVisible) {
-      pendingReloadWhenVisible = false;
-      window.location.reload();
-      return;
-    }
+  if (!isSafeToReloadNow()) {
+    return;
+  }
 
-    loadNotifyTasksFromServer();
+  if (pendingReloadWhenVisible) {
+    pendingReloadWhenVisible = false;
+    window.location.reload();
+    return;
+  }
+
+  loadNotifyTasksFromServer();
+});
+
+// 有些浏览器会先恢复窗口焦点，稍后才更新可见状态；这里再补一个焦点监听。
+window.addEventListener("focus", function () {
+  if (!isSafeToReloadNow()) {
+    return;
+  }
+
+  if (pendingReloadWhenVisible) {
+    pendingReloadWhenVisible = false;
+    window.location.reload();
   }
 });
 
