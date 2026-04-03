@@ -1330,8 +1330,12 @@ def build_daily_report_simple(day_offset: int = 0) -> dict:
             from_value = ch.get("from")
             to_value = ch.get("to")
 
-            from_number = None
-            to_number = None
+            # 历史记录里可能混入空值或非数字文本，这里先安全转换。
+            if not isinstance(from_value, (int, float, str)):
+                continue
+            if not isinstance(to_value, (int, float, str)):
+                continue
+
             try:
                 from_number = float(from_value)
                 to_number = float(to_value)

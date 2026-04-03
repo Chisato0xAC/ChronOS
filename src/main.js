@@ -105,6 +105,8 @@ let dailyReportDayOffset = 0;
 let latestDailyReportData = null;
 // 这个定时器用于控制“开发中提示条”的渐变消失。
 let cuteDevToastTimer = null;
+// 这个标记表示：后台重连时先记住“待刷新”，等页面回到前台再刷新。
+let pendingReloadWhenVisible = false;
 
 // 这个函数根据面板开关状态，更新任务栏按钮高亮。
 function refreshTaskbarActiveButtons() {
@@ -914,7 +916,7 @@ function startStateEventStream() {
   const source = new EventSource("/api/events");
 
   // 第一次连接只做标记；后续如果是“重连成功”，说明后端很可能重启过。
-  // 当前先恢复为整页刷新，方便继续排查“刷新时是否会自己跳到前台”。
+  // 如果页面正在前台，就立刻整页刷新；如果页面在后台，就等用户切回前台时再刷新。
   source.onopen = function () {
     serviceStatusElement.textContent = "🟢 Connected";
 
@@ -923,7 +925,12 @@ function startStateEventStream() {
       return;
     }
 
-    window.location.reload();
+    if (document.visibilityState === "visible") {
+      window.location.reload();
+      return;
+    }
+
+    pendingReloadWhenVisible = true;
   };
 
   // 收到名为 state 的事件时，重新读取 data/state.json。
@@ -1534,9 +1541,16 @@ loadNotifyTasksFromServer();
 // 每秒更新一次，解决“预计通知时间静止”的问题。
 window.setInterval(tickNotifyTasks, 1000);
 
-// 页面回到前台时补拉一次，避免极端情况下错过 SSE 事件。
+// 页面回到前台时，如果之前有“待刷新”，就在这里补一次整页刷新。
+// 没有待刷新时，只补拉通知任务，避免极端情况下错过 SSE 事件。
 document.addEventListener("visibilitychange", function () {
   if (document.visibilityState === "visible") {
+    if (pendingReloadWhenVisible) {
+      pendingReloadWhenVisible = false;
+      window.location.reload();
+      return;
+    }
+
     loadNotifyTasksFromServer();
   }
 });
