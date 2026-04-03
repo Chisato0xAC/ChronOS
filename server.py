@@ -39,6 +39,9 @@ NOTE_FILE = DATA_DIR / "note.json"
 # 这个路径指向通知任务文件（保存前端发布的延迟通知任务）。
 NOTIFY_TASKS_FILE = DATA_DIR / "notify_tasks.json"
 
+# 这个路径指向界面设置文件（保存周视图色块等轻量设置）。
+UI_SETTINGS_FILE = DATA_DIR / "ui_settings.json"
+
 # 这个路径指向状态历史记录文件（JSON Lines：一行一条 JSON）。
 # 注意：这里只记录 data/state.json 的变化，不记录爬虫状态。
 STATE_HISTORY_FILE = DATA_DIR / "state_history.jsonl"
@@ -495,6 +498,22 @@ def ensure_notify_tasks_file_exists() -> None:
     )
 
 
+def ensure_ui_settings_file_exists() -> None:
+    # 如果 data/ui_settings.json 不存在，就创建一个最小设置文件。
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    if UI_SETTINGS_FILE.exists():
+        return
+
+    default_data = {
+        "agenda_block_color": "#dbeafe",
+        "updated_ts": 0,
+    }
+    UI_SETTINGS_FILE.write_text(
+        json.dumps(default_data, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
 def ensure_managed_children_config_exists() -> None:
     # 确保 config/managed_children.json 存在。
     # 这个文件用于给“主调度器”声明要托管哪些子进程。
@@ -878,6 +897,36 @@ def read_notify_tasks_file() -> dict:
 
     return {
         "tasks": [],
+        "updated_ts": 0,
+    }
+
+
+def sanitize_hex_color(raw_value) -> str:
+    # 只允许 #RRGGBB，避免把异常值写进设置文件。
+    color_text = str(raw_value or "").strip()
+    if re.fullmatch(r"#[0-9a-fA-F]{6}", color_text):
+        return color_text.lower()
+    return "#dbeafe"
+
+
+def read_ui_settings_file() -> dict:
+    # 读取 data/ui_settings.json，即使文件损坏也返回可用结构。
+    ensure_ui_settings_file_exists()
+
+    try:
+        data = json.loads(UI_SETTINGS_FILE.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            return {
+                "agenda_block_color": sanitize_hex_color(
+                    data.get("agenda_block_color", "#dbeafe")
+                ),
+                "updated_ts": int(data.get("updated_ts", 0) or 0),
+            }
+    except Exception:
+        pass
+
+    return {
+        "agenda_block_color": "#dbeafe",
         "updated_ts": 0,
     }
 
@@ -2000,6 +2049,35 @@ class SaveDpHandler(BaseHTTPRequestHandler):
                 self.end_headers()
                 return
 
+        # /api/ui-settings：读取界面设置（给前端恢复色块颜色）。
+        if request_path == "/api/ui-settings":
+            try:
+                with STATE_IO_LOCK:
+                    ui_settings = read_ui_settings_file()
+
+                response_body = json.dumps(
+                    {
+                        "ok": True,
+                        "agenda_block_color": str(
+                            ui_settings.get("agenda_block_color", "#dbeafe")
+                        ),
+                        "updated_ts": int(ui_settings.get("updated_ts", 0) or 0),
+                    },
+                    ensure_ascii=False,
+                ).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", str(len(response_body)))
+                self.end_headers()
+                self.wfile.write(response_body)
+                return
+            except Exception as e:
+                log_error(f"读取界面设置失败: {e}")
+                self.send_response(500)
+                self.end_headers()
+                return
+
         # /api/notify-tasks：读取通知任务列表（给前端渲染“待触发任务”）。
         if request_path == "/api/notify-tasks":
             try:
@@ -2135,6 +2213,7 @@ class SaveDpHandler(BaseHTTPRequestHandler):
             "/api/trigger-event",
             "/api/calc-cycle-run-cost",
             "/api/save-note",
+            "/api/save-ui-settings",
             "/api/open-floating-window",
             "/api/notify-task-create",
             "/api/notify-task-complete",
@@ -2185,6 +2264,58 @@ class SaveDpHandler(BaseHTTPRequestHandler):
                 return
             except Exception as e:
                 log_error(f"保存便签失败: {e}")
+                self.send_response(500)
+                self.end_headers()
+                return
+
+        # /api/save-ui-settings：保存界面设置。
+        if self.path == "/api/save-ui-settings":
+            content_length = int(self.headers.get("Content-Length", "0"))
+            request_body = self.rfile.read(content_length)
+
+            try:
+                body_data = json.loads(request_body.decode("utf-8"))
+            except Exception:
+                self.send_response(400)
+                self.end_headers()
+                return
+
+            if not isinstance(body_data, dict):
+                self.send_response(400)
+                self.end_headers()
+                return
+
+            block_color = sanitize_hex_color(
+                body_data.get("agenda_block_color", "#dbeafe")
+            )
+            now_ts = int(time.time())
+
+            try:
+                with STATE_IO_LOCK:
+                    write_json_atomic(
+                        UI_SETTINGS_FILE,
+                        {
+                            "agenda_block_color": block_color,
+                            "updated_ts": now_ts,
+                        },
+                    )
+
+                response_body = json.dumps(
+                    {
+                        "ok": True,
+                        "agenda_block_color": block_color,
+                        "updated_ts": now_ts,
+                    },
+                    ensure_ascii=False,
+                ).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(response_body)))
+                self.end_headers()
+                self.wfile.write(response_body)
+                return
+            except Exception as e:
+                log_error(f"保存界面设置失败: {e}")
                 self.send_response(500)
                 self.end_headers()
                 return
@@ -2804,6 +2935,7 @@ if __name__ == "__main__":
         ensure_state_file_exists()
         ensure_note_file_exists()
         ensure_notify_tasks_file_exists()
+        ensure_ui_settings_file_exists()
         ensure_crawler_state_file_exists()
         ensure_state_history_file_exists()
         ensure_process_watch_file_exists()

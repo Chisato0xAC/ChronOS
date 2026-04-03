@@ -41,6 +41,8 @@ const noteSaveStatusElement = document.getElementById("noteSaveStatus");
 const openFloatingWindowButtonElement = document.getElementById("openFloatingWindowButton");
 // 这行代码拿到“导航栏位置”下拉框。
 const navPositionSelectElement = document.getElementById("navPositionSelect");
+// 这行代码拿到“周视图色块颜色”选择器。
+const agendaBlockColorInputElement = document.getElementById("agendaBlockColorInput");
 // 这行代码拿到“导航栏卡片”本体。
 const navBarCardElement = document.getElementById("navBarCard");
 // 这行代码拿到“设置”按钮。
@@ -115,8 +117,28 @@ let pendingReloadRetryTimer = null;
 let agendaNowLineTimer = null;
 // 这个数组保存周视图里的进程监控会话。
 let agendaProcessSessions = [];
+// 这个变量保存周视图色块的当前自定义颜色。
+let agendaBlockColor = "#dbeafe";
 // 同一天里，相同进程如果前后间隔不超过这个秒数，就合并成一个块。
 const AGENDA_SESSION_MERGE_GAP_SECONDS = 8 * 60;
+
+// 这个函数把颜色值收紧成 #RRGGBB，避免输入异常值。
+function sanitizeHexColor(colorValue) {
+  const safeColor = String(colorValue || "").trim().toLowerCase();
+  if (/^#[0-9a-f]{6}$/.test(safeColor)) {
+    return safeColor;
+  }
+  return "#dbeafe";
+}
+
+// 这个函数把当前色块颜色同步到设置输入框。
+function syncAgendaBlockColorInput() {
+  if (!agendaBlockColorInputElement) {
+    return;
+  }
+
+  agendaBlockColorInputElement.value = sanitizeHexColor(agendaBlockColor);
+}
 
 // 这个函数判断页面现在是否处于“可立刻刷新”的可见状态。
 // 这里只要求标签页可见，避免浏览器焦点判断过严导致该刷没刷。
@@ -824,13 +846,53 @@ function getAgendaWeekStartDate() {
 
 // 这个函数给不同进程名分配固定颜色，方便肉眼区分。
 function getAgendaSessionColor(processName) {
-  const palette = ["#dbeafe", "#dcfce7", "#fef3c7", "#fce7f3", "#e9d5ff", "#fde68a"];
-  const name = String(processName || "");
-  let sum = 0;
-  for (let i = 0; i < name.length; i = i + 1) {
-    sum = sum + name.charCodeAt(i);
+  return sanitizeHexColor(agendaBlockColor);
+}
+
+// 这个函数从后端读取界面设置，并恢复色块颜色。
+async function loadUiSettingsFromServer() {
+  try {
+    const response = await fetch("/api/ui-settings", {
+      cache: "no-store",
+    });
+    const result = await response.json();
+    if (!response.ok || !result || result.ok !== true) {
+      return;
+    }
+
+    agendaBlockColor = sanitizeHexColor(result.agenda_block_color);
+    syncAgendaBlockColorInput();
+    renderAgendaProcessSessions();
+  } catch (error) {
+    // 读取失败时保留默认颜色，不打断其他功能。
   }
-  return palette[sum % palette.length];
+}
+
+// 这个函数把新的色块颜色保存到后端文件。
+async function saveAgendaBlockColorToServer(colorValue) {
+  const safeColor = sanitizeHexColor(colorValue);
+
+  try {
+    const response = await fetch("/api/save-ui-settings", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        agenda_block_color: safeColor,
+      }),
+    });
+    const result = await response.json();
+    if (!response.ok || !result || result.ok !== true) {
+      return;
+    }
+
+    agendaBlockColor = sanitizeHexColor(result.agenda_block_color);
+    syncAgendaBlockColorInput();
+    renderAgendaProcessSessions();
+  } catch (error) {
+    // 保存失败时先不弹错，避免打断页面其他操作。
+  }
 }
 
 // 这个函数把时间格式化成 HH:MM。
@@ -1473,6 +1535,7 @@ async function undoLastChange() {
 // 这行执行读取 JSON 并更新页面的流程。
 renderAgendaWeekView();
 loadAgendaProcessSessionsFromServer();
+loadUiSettingsFromServer();
 loadStateFromFile();
 loadHistoryFromServer();
 renderDailyReportSwitchButtons();
@@ -1586,6 +1649,18 @@ if (navPositionSelectElement) {
 
   // 页面启动时先应用一次默认位置。
   applyNavPosition(navPositionSelectElement.value);
+}
+
+// 颜色一改就立刻刷新周视图，并保存到项目文件里。
+if (agendaBlockColorInputElement) {
+  syncAgendaBlockColorInput();
+  agendaBlockColorInputElement.addEventListener("input", function () {
+    agendaBlockColor = sanitizeHexColor(agendaBlockColorInputElement.value);
+    renderAgendaProcessSessions();
+  });
+  agendaBlockColorInputElement.addEventListener("change", function () {
+    saveAgendaBlockColorToServer(agendaBlockColorInputElement.value);
+  });
 }
 
 // 点击“设置”按钮时，打开设置弹窗。
