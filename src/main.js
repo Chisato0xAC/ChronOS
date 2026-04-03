@@ -47,6 +47,8 @@ const taskbarSettingsButtonElement = document.getElementById("taskbarSettingsBut
 const taskbarStatusButtonElement = document.getElementById("taskbarStatusButton");
 // 这行代码拿到“物品”按钮。
 const taskbarItemsButtonElement = document.getElementById("taskbarItemsButton");
+// 这行代码拿到“商店”按钮。
+const taskbarStoreButtonElement = document.getElementById("taskbarStoreButton");
 // 这行代码拿到“工具”按钮。
 const taskbarToolsButtonElement = document.getElementById("taskbarToolsButton");
 // 这行代码拿到“记录”按钮。
@@ -912,7 +914,7 @@ function startStateEventStream() {
   const source = new EventSource("/api/events");
 
   // 第一次连接只做标记；后续如果是“重连成功”，说明后端很可能重启过。
-  // 这里不再整页刷新，避免页面被强制重载；改为静默补拉一次数据。
+  // 当前先恢复为整页刷新，方便继续排查“刷新时是否会自己跳到前台”。
   source.onopen = function () {
     serviceStatusElement.textContent = "🟢 Connected";
 
@@ -921,11 +923,7 @@ function startStateEventStream() {
       return;
     }
 
-    loadStateFromFile();
-    loadHistoryFromServer();
-    loadDailyReportSimpleFromServer();
-    loadNotifyTasksFromServer();
-    syncMainRootOffset();
+    window.location.reload();
   };
 
   // 收到名为 state 的事件时，重新读取 data/state.json。
@@ -1141,6 +1139,13 @@ if (taskbarStatusButtonElement) {
 // 点击“物品”按钮时，显示“开发中”提示。
 if (taskbarItemsButtonElement) {
   taskbarItemsButtonElement.addEventListener("pointerup", function (event) {
+    showCuteDevelopingToast(event);
+  });
+}
+
+// 点击“商店”按钮时，显示“开发中”提示。
+if (taskbarStoreButtonElement) {
+  taskbarStoreButtonElement.addEventListener("pointerup", function (event) {
     showCuteDevelopingToast(event);
   });
 }
