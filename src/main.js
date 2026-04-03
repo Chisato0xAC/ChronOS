@@ -31,6 +31,8 @@ const dailyReportPrevDayButtonElement = document.getElementById("dailyReportPrev
 const dailyReportNextDayButtonElement = document.getElementById("dailyReportNextDayButton");
 // 这行代码拿到“服务状态”显示区域。
 const serviceStatusElement = document.getElementById("serviceStatus");
+// 这行代码拿到首页里的周视图容器。
+const agendaWeekGridElement = document.getElementById("agendaWeekGrid");
 // 这行代码拿到右侧便签输入框。
 const noteInputElement = document.getElementById("noteInput");
 // 这行代码拿到便签保存状态提示。
@@ -721,6 +723,75 @@ async function loadDailyReportSimpleFromServer() {
   }
 }
 
+// 这个函数返回“周视图顶部”要显示的 7 天日期，从周一开始。
+function getAgendaWeekDates() {
+  const today = new Date();
+  const weekStart = new Date(today);
+  const weekDay = today.getDay();
+  const mondayOffset = weekDay === 0 ? -6 : 1 - weekDay;
+
+  weekStart.setHours(0, 0, 0, 0);
+  weekStart.setDate(today.getDate() + mondayOffset);
+
+  const dates = [];
+  const weekDayNames = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
+  for (let i = 0; i < 7; i = i + 1) {
+    const date = new Date(weekStart);
+    date.setDate(weekStart.getDate() + i);
+
+    dates.push({
+      label: weekDayNames[i],
+      month: date.getMonth() + 1,
+      day: date.getDate(),
+    });
+  }
+
+  return dates;
+}
+
+// 这个函数把首页的周视图骨架渲染出来：上面是日期，左边是时间。
+function renderAgendaWeekView() {
+  if (!agendaWeekGridElement) {
+    return;
+  }
+
+  const weekDates = getAgendaWeekDates();
+  const hourLabels = [];
+  for (let hour = 0; hour < 24; hour = hour + 1) {
+    hourLabels.push(padTwoDigits(hour) + ":00");
+  }
+
+  let html = '<div class="agenda-week-header">';
+  html = html + '<div class="agenda-week-corner">时间</div>';
+
+  for (let i = 0; i < weekDates.length; i = i + 1) {
+    const oneDate = weekDates[i];
+    html = html
+      + '<div class="agenda-week-date">'
+      + oneDate.label
+      + '<br />'
+      + String(oneDate.month)
+      + '/'
+      + String(oneDate.day)
+      + '</div>';
+  }
+
+  html = html + '</div>';
+
+  for (let rowIndex = 0; rowIndex < hourLabels.length; rowIndex = rowIndex + 1) {
+    html = html + '<div class="agenda-week-row">';
+    html = html + '<div class="agenda-week-time">' + hourLabels[rowIndex] + '</div>';
+
+    for (let colIndex = 0; colIndex < 7; colIndex = colIndex + 1) {
+      html = html + '<div class="agenda-week-cell"></div>';
+    }
+
+    html = html + '</div>';
+  }
+
+  agendaWeekGridElement.innerHTML = html;
+}
+
 // 这个函数切换到“前一天”的每日日报。
 function showPreviousDailyReportDay() {
   dailyReportDayOffset = dailyReportDayOffset - 1;
@@ -1008,6 +1079,7 @@ async function undoLastChange() {
 }
 
 // 这行执行读取 JSON 并更新页面的流程。
+renderAgendaWeekView();
 loadStateFromFile();
 loadHistoryFromServer();
 renderDailyReportSwitchButtons();

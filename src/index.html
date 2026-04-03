@@ -10,6 +10,7 @@
       background: #f5f4ee;
       color: #1f2328;
       font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+      overflow: hidden;
     }
 
     h3 {
@@ -411,6 +412,76 @@
       margin-top: 0;
     }
 
+    #agendaWeekCard {
+      display: flex;
+      flex-direction: column;
+      height: calc(100vh - 110px);
+      overflow-x: auto;
+    }
+
+    #agendaWeekGrid {
+      flex: 1;
+      min-width: 760px;
+      border: 1px solid #e8e3d6;
+      background: #fbfaf4;
+      overflow: auto;
+    }
+
+    .agenda-week-header,
+    .agenda-week-row {
+      display: grid;
+      grid-template-columns: 72px repeat(7, minmax(88px, 1fr));
+    }
+
+    .agenda-week-header {
+      position: sticky;
+      top: 0;
+      z-index: 1;
+      background: #f6f1e5;
+    }
+
+    .agenda-week-corner,
+    .agenda-week-date,
+    .agenda-week-time,
+    .agenda-week-cell {
+      box-sizing: border-box;
+      border-right: 1px solid #e8e3d6;
+      border-bottom: 1px solid #e8e3d6;
+      padding: 8px;
+    }
+
+    .agenda-week-corner {
+      font-weight: bold;
+      color: #6b7280;
+    }
+
+    .agenda-week-date {
+      text-align: center;
+      font-weight: bold;
+      white-space: pre-line;
+    }
+
+    .agenda-week-time {
+      background: #fff8eb;
+      color: #6b7280;
+      font-size: 13px;
+    }
+
+    .agenda-week-cell {
+      min-height: 48px;
+      background: #fffdf7;
+    }
+
+    .agenda-week-row:last-child .agenda-week-time,
+    .agenda-week-row:last-child .agenda-week-cell {
+      border-bottom: 0;
+    }
+
+    .agenda-week-header .agenda-week-date:last-child,
+    .agenda-week-row .agenda-week-cell:last-child {
+      border-right: 0;
+    }
+
     #dailyReportCard.stats-focus-flash {
       border-color: #bfa86a;
       box-shadow: 0 0 0 2px rgba(191, 168, 106, 0.25);
@@ -437,6 +508,11 @@
         top: 6px;
         bottom: 6px;
         width: 58px;
+      }
+
+      .agenda-week-header,
+      .agenda-week-row {
+        grid-template-columns: 64px repeat(7, minmax(84px, 1fr));
       }
     }
 
@@ -546,23 +622,8 @@
 
       <section id="mainContentSection" class="main-grid">
       <div class="left-column">
-        <article aria-labelledby="dpActionTitle">
-          <h3 id="dpActionTitle">修改 DP</h3>
-
-          <div>
-            <button id="addDpButton" type="button">DP +1</button>
-            <button id="minusDpButton" type="button">DP -1</button>
-          </div>
-
-          <div>
-            <label for="dpInput">表达式（例：+10-3）</label>
-            <input id="dpInput" type="text" />
-            <button id="setDpButton" type="button">应用表达式</button>
-          </div>
-
-          <div>
-            <button id="undoButton" type="button">撤销（Undo）</button>
-          </div>
+        <article id="agendaWeekCard" aria-label="Agenda Week View">
+          <div id="agendaWeekGrid">（正在生成周视图）</div>
         </article>
 
       </div>
@@ -589,6 +650,25 @@
             <button id="dailyReportNextDayButton" class="daily-report-switch-button" type="button" aria-label="查看后一天">&gt;</button>
           </div>
           <pre id="dailyReportSimple">（正在读取）</pre>
+        </article>
+
+        <article aria-labelledby="dpActionTitle">
+          <h3 id="dpActionTitle">修改 DP</h3>
+
+          <div>
+            <button id="addDpButton" type="button">DP +1</button>
+            <button id="minusDpButton" type="button">DP -1</button>
+          </div>
+
+          <div>
+            <label for="dpInput">表达式（例：+10-3）</label>
+            <input id="dpInput" type="text" />
+            <button id="setDpButton" type="button">应用表达式</button>
+          </div>
+
+          <div>
+            <button id="undoButton" type="button">撤销（Undo）</button>
+          </div>
         </article>
 
       </div>
