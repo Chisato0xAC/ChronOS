@@ -109,10 +109,14 @@ let latestDailyReportData = null;
 let cuteDevToastTimer = null;
 // 这个标记表示：后台重连时先记住“待刷新”，等页面回到前台再刷新。
 let pendingReloadWhenVisible = false;
+// 这个定时器用于在等待焦点恢复时，短时间内反复尝试补刷新。
+let pendingReloadRetryTimer = null;
 // 这个定时器用于定时刷新周视图里的“当前时间横条”。
 let agendaNowLineTimer = null;
 // 这个数组保存周视图里的进程监控会话。
 let agendaProcessSessions = [];
+// 同一天里，相同进程如果前后间隔不超过这个秒数，就合并成一个块。
+const AGENDA_SESSION_MERGE_GAP_SECONDS = 5 * 60;
 
 // 这个函数判断页面现在是否真的处于“可安全立刻刷新”的前台状态。
 // 只有标签页可见，且文档已经拿到焦点时，才立刻刷新。
@@ -126,6 +130,43 @@ function isSafeToReloadNow() {
   }
 
   return true;
+}
+
+// 这个函数统一处理“待刷新”状态：能立刻刷就刷，不能刷就继续等。
+function flushPendingReloadIfReady() {
+  if (!pendingReloadWhenVisible) {
+    return;
+  }
+
+  if (!isSafeToReloadNow()) {
+    return;
+  }
+
+  pendingReloadWhenVisible = false;
+
+  if (pendingReloadRetryTimer !== null) {
+    window.clearInterval(pendingReloadRetryTimer);
+    pendingReloadRetryTimer = null;
+  }
+
+  window.location.reload();
+}
+
+// 这个函数开启一个短时重试：避免焦点状态比 SSE 重连慢半拍，导致该刷没刷。
+function ensurePendingReloadRetry() {
+  if (pendingReloadRetryTimer !== null) {
+    return;
+  }
+
+  pendingReloadRetryTimer = window.setInterval(function () {
+    if (!pendingReloadWhenVisible) {
+      window.clearInterval(pendingReloadRetryTimer);
+      pendingReloadRetryTimer = null;
+      return;
+    }
+
+    flushPendingReloadIfReady();
+  }, 300);
 }
 
 // 这个函数根据面板开关状态，更新任务栏按钮高亮。
@@ -801,6 +842,86 @@ function formatAgendaShortTime(dateValue) {
   return padTwoDigits(dateValue.getHours()) + ":" + padTwoDigits(dateValue.getMinutes());
 }
 
+// 这个函数把一条会话按“天”拆成多段，方便周视图逐列绘制。
+function splitAgendaSessionByDay(startTs, endTs, weekStartTs) {
+  const segments = [];
+  let currentStartTs = Math.floor(Number(startTs) || 0);
+  const safeEndTs = Math.floor(Number(endTs) || 0);
+
+  while (currentStartTs < safeEndTs) {
+    const currentDate = new Date(currentStartTs * 1000);
+    const dayStartTs = Math.floor(
+      new Date(
+        currentDate.getFullYear(),
+        currentDate.getMonth(),
+        currentDate.getDate(),
+        0,
+        0,
+        0,
+        0
+      ).getTime() / 1000
+    );
+    const nextDayStartTs = dayStartTs + 86400;
+    const segmentEndTs = Math.min(safeEndTs, nextDayStartTs);
+    const dayIndex = Math.floor((dayStartTs - weekStartTs) / 86400);
+
+    segments.push({
+      dayIndex: dayIndex,
+      startTs: currentStartTs,
+      endTs: segmentEndTs,
+    });
+
+    currentStartTs = segmentEndTs;
+  }
+
+  return segments;
+}
+
+// 这个函数把“同一天、同进程、间隔很短”的小段先合并，减少碎块。
+function mergeAgendaSessionSegments(rawSegments) {
+  if (!Array.isArray(rawSegments) || rawSegments.length === 0) {
+    return [];
+  }
+
+  const sortedSegments = rawSegments.slice().sort(function (a, b) {
+    const dayDiff = Number(a.dayIndex || 0) - Number(b.dayIndex || 0);
+    if (dayDiff !== 0) {
+      return dayDiff;
+    }
+
+    const processDiff = String(a.process_name || "").localeCompare(String(b.process_name || ""));
+    if (processDiff !== 0) {
+      return processDiff;
+    }
+
+    return Number(a.startTs || 0) - Number(b.startTs || 0);
+  });
+
+  const merged = [];
+  for (let i = 0; i < sortedSegments.length; i = i + 1) {
+    const currentSegment = sortedSegments[i] || {};
+    const lastSegment = merged.length > 0 ? merged[merged.length - 1] : null;
+
+    if (!lastSegment) {
+      merged.push(currentSegment);
+      continue;
+    }
+
+    const isSameDay = Number(lastSegment.dayIndex || -1) === Number(currentSegment.dayIndex || -2);
+    const isSameProcess = String(lastSegment.process_name || "") === String(currentSegment.process_name || "");
+    const gapSeconds = Number(currentSegment.startTs || 0) - Number(lastSegment.endTs || 0);
+
+    if (isSameDay && isSameProcess && gapSeconds >= 0 && gapSeconds <= AGENDA_SESSION_MERGE_GAP_SECONDS) {
+      lastSegment.endTs = Math.max(Number(lastSegment.endTs || 0), Number(currentSegment.endTs || 0));
+      continue;
+    }
+
+    merged.push(currentSegment);
+  }
+
+  return merged;
+}
+
 // 这个函数把进程监控会话画到周视图里。
 function renderAgendaProcessSessions() {
   if (!agendaWeekGridElement) {
@@ -831,6 +952,7 @@ function renderAgendaProcessSessions() {
   const firstCellOffsetLeft = firstCellElement.offsetLeft;
   const weekStartDate = getAgendaWeekStartDate();
   const weekStartTs = Math.floor(weekStartDate.getTime() / 1000);
+  const rawSegments = [];
 
   for (let i = 0; i < agendaProcessSessions.length; i = i + 1) {
     const session = agendaProcessSessions[i] || {};
@@ -840,23 +962,41 @@ function renderAgendaProcessSessions() {
       continue;
     }
 
-    const startDate = new Date(startTs * 1000);
-    const endDate = new Date(endTs * 1000);
-    const startDayIndex = Math.floor((startTs - weekStartTs) / 86400);
-    const endDayIndex = Math.floor((endTs - weekStartTs) / 86400);
-    if (startDayIndex < 0 || startDayIndex > 6) {
+    const segments = splitAgendaSessionByDay(startTs, endTs, weekStartTs);
+    for (let j = 0; j < segments.length; j = j + 1) {
+      const segment = segments[j] || {};
+      rawSegments.push({
+        dayIndex: Number(segment.dayIndex),
+        startTs: Number(segment.startTs || 0),
+        endTs: Number(segment.endTs || 0),
+        process_name: String(session.process_name || ""),
+      });
+    }
+  }
+
+  const mergedSegments = mergeAgendaSessionSegments(rawSegments);
+  for (let i = 0; i < mergedSegments.length; i = i + 1) {
+    const segment = mergedSegments[i] || {};
+    const dayIndex = Number(segment.dayIndex);
+    const segmentStartTs = Number(segment.startTs || 0);
+    const segmentEndTs = Number(segment.endTs || 0);
+    if (Number.isNaN(dayIndex) || dayIndex < 0 || dayIndex > 6) {
+      continue;
+    }
+    if (Number.isNaN(segmentStartTs) || Number.isNaN(segmentEndTs) || segmentEndTs <= segmentStartTs) {
       continue;
     }
 
-    // 第一版先只画“同一天内结束”的会话，避免跨天块增加复杂度。
-    if (startDayIndex !== endDayIndex) {
-      continue;
+    const segmentStartDate = new Date(segmentStartTs * 1000);
+    const segmentEndDate = new Date(segmentEndTs * 1000);
+    const startMinutes = segmentStartDate.getHours() * 60 + segmentStartDate.getMinutes();
+    let endMinutes = segmentEndDate.getHours() * 60 + segmentEndDate.getMinutes();
+    if (segmentEndDate.getHours() === 0 && segmentEndDate.getMinutes() === 0 && segmentEndTs > segmentStartTs) {
+      endMinutes = 24 * 60;
     }
 
-    const startMinutes = startDate.getHours() * 60 + startDate.getMinutes();
-    const endMinutes = endDate.getHours() * 60 + endDate.getMinutes();
     const top = firstCellOffsetTop + (startMinutes / 60) * rowHeight;
-    const left = firstCellOffsetLeft + startDayIndex * columnWidth + 2;
+    const left = firstCellOffsetLeft + dayIndex * columnWidth + 2;
     const height = Math.max(8, ((endMinutes - startMinutes) / 60) * rowHeight);
     const width = Math.max(8, columnWidth - 4);
 
@@ -866,9 +1006,9 @@ function renderAgendaProcessSessions() {
     blockElement.style.left = String(left) + "px";
     blockElement.style.width = String(width) + "px";
     blockElement.style.height = String(height) + "px";
-    blockElement.style.background = getAgendaSessionColor(session.process_name);
-    blockElement.title = String(session.process_name || "") + "\n" + formatAgendaShortTime(startDate) + " - " + formatAgendaShortTime(endDate);
-    blockElement.textContent = String(session.process_name || "");
+    blockElement.style.background = getAgendaSessionColor(segment.process_name);
+    blockElement.title = String(segment.process_name || "") + "\n" + formatAgendaShortTime(segmentStartDate) + " - " + formatAgendaShortTime(segmentEndDate);
+    blockElement.textContent = String(segment.process_name || "");
     layerElement.appendChild(blockElement);
   }
 
@@ -1222,6 +1362,7 @@ function startStateEventStream() {
     }
 
     pendingReloadWhenVisible = true;
+    ensurePendingReloadRetry();
   };
 
   // 收到名为 state 的事件时，重新读取 data/state.json。
@@ -1839,28 +1980,21 @@ window.setInterval(tickNotifyTasks, 1000);
 // 页面状态变化时，如果之前有“待刷新”，就在真正回到前台并拿到焦点后补一次整页刷新。
 // 没有待刷新时，只补拉通知任务，避免极端情况下错过 SSE 事件。
 document.addEventListener("visibilitychange", function () {
-  if (!isSafeToReloadNow()) {
-    return;
-  }
-
   if (pendingReloadWhenVisible) {
-    pendingReloadWhenVisible = false;
-    window.location.reload();
+    flushPendingReloadIfReady();
     return;
   }
 
-  loadNotifyTasksFromServer();
+  if (isSafeToReloadNow()) {
+    loadNotifyTasksFromServer();
+  }
 });
 
 // 有些浏览器会先恢复窗口焦点，稍后才更新可见状态；这里再补一个焦点监听。
 window.addEventListener("focus", function () {
-  if (!isSafeToReloadNow()) {
-    return;
-  }
-
   if (pendingReloadWhenVisible) {
-    pendingReloadWhenVisible = false;
-    window.location.reload();
+    flushPendingReloadIfReady();
+    return;
   }
 });
 

@@ -46,6 +46,9 @@ STATE_HISTORY_FILE = DATA_DIR / "state_history.jsonl"
 # 进程监控状态文件（监控“一个目标进程”的运行时长）。
 PROCESS_WATCH_FILE = DATA_DIR / "process_watch.json"
 
+# 进程监控事件文件（JSON Lines：一行一条 start/stop 事件）。
+PROCESS_WATCH_EVENTS_FILE = DATA_DIR / "process_watch_events.jsonl"
+
 # 这个列表保存所有 SSE 连接（前端会连过来等待“状态已变化”的通知）。
 SSE_CLIENT_QUEUES = []
 SSE_CLIENT_QUEUES_LOCK = threading.Lock()
@@ -1409,6 +1412,134 @@ def build_daily_report_simple(day_offset: int = 0) -> dict:
     return result
 
 
+def build_process_watch_week_sessions() -> dict:
+    # 返回“本周进程监控会话列表”，给首页周视图渲染时段块使用。
+    now = datetime.now()
+    week_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    week_start = week_start - timedelta(days=week_start.weekday())
+    week_end = week_start + timedelta(days=7)
+    week_start_ts = int(week_start.timestamp())
+    week_end_ts = int(week_end.timestamp())
+
+    active_start_map = {}
+    items = []
+
+    if PROCESS_WATCH_EVENTS_FILE.exists():
+        lines = PROCESS_WATCH_EVENTS_FILE.read_text(encoding="utf-8").splitlines()
+        for raw in lines:
+            raw = raw.strip()
+            if raw == "":
+                continue
+
+            try:
+                record = json.loads(raw)
+            except Exception:
+                continue
+
+            if not isinstance(record, dict):
+                continue
+
+            event_type = str(record.get("type", "")).strip().lower()
+            process_name = str(record.get("process_name", "")).strip().lower()
+            try:
+                pid = int(record.get("pid", 0) or 0)
+                ts = int(record.get("ts", 0) or 0)
+            except Exception:
+                continue
+
+            if process_name == "" or pid <= 0 or ts <= 0:
+                continue
+
+            event_key = process_name + "#" + str(pid)
+
+            if event_type == "start":
+                active_start_map[event_key] = {
+                    "process_name": process_name,
+                    "pid": pid,
+                    "start_ts": ts,
+                }
+                continue
+
+            if event_type != "stop":
+                continue
+
+            start_info = active_start_map.pop(event_key, None)
+            if not isinstance(start_info, dict):
+                continue
+
+            start_ts = int(start_info.get("start_ts", 0) or 0)
+            end_ts = int(ts)
+            if end_ts <= start_ts:
+                continue
+
+            clipped_start_ts = max(start_ts, week_start_ts)
+            clipped_end_ts = min(end_ts, week_end_ts)
+            if clipped_end_ts <= clipped_start_ts:
+                continue
+
+            items.append(
+                {
+                    "process_name": process_name,
+                    "pid": pid,
+                    "start_ts": clipped_start_ts,
+                    "end_ts": clipped_end_ts,
+                    "start_text": datetime.fromtimestamp(clipped_start_ts).strftime(
+                        "%Y-%m-%d %H:%M:%S"
+                    ),
+                    "end_text": datetime.fromtimestamp(clipped_end_ts).strftime(
+                        "%Y-%m-%d %H:%M:%S"
+                    ),
+                }
+            )
+
+    now_ts = int(time.time())
+    for start_info in active_start_map.values():
+        if not isinstance(start_info, dict):
+            continue
+
+        process_name = str(start_info.get("process_name", "")).strip().lower()
+        pid = int(start_info.get("pid", 0) or 0)
+        start_ts = int(start_info.get("start_ts", 0) or 0)
+        if process_name == "" or pid <= 0 or start_ts <= 0:
+            continue
+
+        clipped_start_ts = max(start_ts, week_start_ts)
+        clipped_end_ts = min(now_ts, week_end_ts)
+        if clipped_end_ts <= clipped_start_ts:
+            continue
+
+        items.append(
+            {
+                "process_name": process_name,
+                "pid": pid,
+                "start_ts": clipped_start_ts,
+                "end_ts": clipped_end_ts,
+                "start_text": datetime.fromtimestamp(clipped_start_ts).strftime(
+                    "%Y-%m-%d %H:%M:%S"
+                ),
+                "end_text": datetime.fromtimestamp(clipped_end_ts).strftime(
+                    "%Y-%m-%d %H:%M:%S"
+                ),
+            }
+        )
+
+    items.sort(
+        key=lambda one: (
+            int(one.get("start_ts", 0) or 0),
+            str(one.get("process_name", "")),
+        )
+    )
+
+    return {
+        "ok": True,
+        "week_start_ts": week_start_ts,
+        "week_end_ts": week_end_ts,
+        "week_start_text": week_start.strftime("%Y-%m-%d %H:%M:%S"),
+        "week_end_text": week_end.strftime("%Y-%m-%d %H:%M:%S"),
+        "items": items,
+    }
+
+
 def sse_broadcast(event_name: str, data: dict) -> None:
     # 把一条事件广播给所有在线的 SSE 客户端。
     # SSE 协议格式：
@@ -1818,6 +1949,26 @@ class SaveDpHandler(BaseHTTPRequestHandler):
                 return
             except Exception as e:
                 log_error(f"读取今日日报失败: {e}")
+                self.send_response(500)
+                self.end_headers()
+                return
+
+        # /api/process-watch-week：返回本周进程监控会话（给周视图画时段块）。
+        if request_path == "/api/process-watch-week":
+            try:
+                with STATE_IO_LOCK:
+                    payload = build_process_watch_week_sessions()
+
+                response_body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", str(len(response_body)))
+                self.end_headers()
+                self.wfile.write(response_body)
+                return
+            except Exception as e:
+                log_error(f"读取进程监控周视图数据失败: {e}")
                 self.send_response(500)
                 self.end_headers()
                 return
