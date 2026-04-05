@@ -1264,88 +1264,6 @@ def get_day_window_by_boundary_ts(now_ts: int) -> tuple[int, int]:
     return int(day_start_dt.timestamp()), int(day_end_dt.timestamp())
 
 
-def build_checkin_status(now_ts: int | None = None) -> dict:
-    # 返回当前周期的打卡状态。
-    # 规则：
-    # 1. 每个周期只能打卡一次
-    # 2. 只有本地时间 9:00-9:59 可用
-    safe_now_ts = int(time.time()) if now_ts is None else int(now_ts)
-    now_dt = datetime.fromtimestamp(safe_now_ts)
-    cycle_start_ts, cycle_end_ts = get_day_window_by_boundary_ts(safe_now_ts)
-    reward_dp = int(CHECKIN_REWARD_DP)
-    already_checked_in = False
-    undone_ts = set()
-
-    if STATE_HISTORY_FILE.exists():
-        try:
-            lines = STATE_HISTORY_FILE.read_text(encoding="utf-8").splitlines()
-        except Exception:
-            lines = []
-
-        for i in range(len(lines) - 1, -1, -1):
-            raw = lines[i].strip()
-            if raw == "":
-                continue
-
-            try:
-                record = json.loads(raw)
-            except Exception:
-                continue
-
-            if not isinstance(record, dict):
-                continue
-
-            if str(record.get("type", "")) != "undo":
-                continue
-
-            data = record.get("data")
-            if not isinstance(data, dict):
-                continue
-
-            undo_of_ts = data.get("undo_of_ts")
-            if isinstance(undo_of_ts, int):
-                undone_ts.add(undo_of_ts)
-
-        for i in range(len(lines) - 1, -1, -1):
-            raw = lines[i].strip()
-            if raw == "":
-                continue
-
-            try:
-                record = json.loads(raw)
-            except Exception:
-                continue
-
-            if not isinstance(record, dict):
-                continue
-
-            record_type = str(record.get("type", ""))
-            if record_type != "checkin":
-                continue
-
-            ts = record.get("ts")
-            if not isinstance(ts, int):
-                continue
-            if ts in undone_ts:
-                continue
-            if ts < cycle_start_ts or ts >= cycle_end_ts:
-                continue
-
-            already_checked_in = True
-            break
-
-    is_available = now_dt.hour == 9 and already_checked_in is False
-
-    return {
-        "ok": True,
-        "reward_dp": int(reward_dp),
-        "is_available": bool(is_available),
-        "already_checked_in": bool(already_checked_in),
-        "cycle_start_ts": int(cycle_start_ts),
-        "cycle_end_ts": int(cycle_end_ts),
-    }
-
-
 def build_daily_report_simple(day_offset: int = 0) -> dict:
     # 生成“每日日报（简略）”：
     # - 支持按 day_offset 查看任意一天（0=当前日，-1=前一天）
@@ -2093,26 +2011,6 @@ class SaveDpHandler(BaseHTTPRequestHandler):
                 self.end_headers()
                 return
 
-        # /api/checkin-status：返回首页打卡按钮当前是否可用。
-        if request_path == "/api/checkin-status":
-            try:
-                with STATE_IO_LOCK:
-                    payload = build_checkin_status()
-
-                response_body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json; charset=utf-8")
-                self.send_header("Cache-Control", "no-store")
-                self.send_header("Content-Length", str(len(response_body)))
-                self.end_headers()
-                self.wfile.write(response_body)
-                return
-            except Exception as e:
-                log_error(f"读取打卡状态失败: {e}")
-                self.send_response(500)
-                self.end_headers()
-                return
-
         # /api/process-watch-week：返回本周进程监控会话（给周视图画时段块）。
         if request_path == "/api/process-watch-week":
             try:
@@ -2339,37 +2237,17 @@ class SaveDpHandler(BaseHTTPRequestHandler):
         if self.path == "/api/checkin":
             try:
                 with STATE_IO_LOCK:
-                    status = build_checkin_status()
                     old_dp = int(read_state_file().get("dp", 0))
+                    reward_dp = int(CHECKIN_REWARD_DP)
+                    now_ts = int(time.time())
+                    now_dt = datetime.fromtimestamp(now_ts)
+                    cycle_start_ts, cycle_end_ts = get_day_window_by_boundary_ts(now_ts)
 
-                    if status.get("already_checked_in") is True:
-                        response_body = json.dumps(
-                            {
-                                "ok": False,
-                                "reason": "already_checked_in",
-                                "reward_dp": int(status.get("reward_dp", 1) or 1),
-                                "is_available": False,
-                                "already_checked_in": True,
-                            },
-                            ensure_ascii=False,
-                        ).encode("utf-8")
-                        self.send_response(200)
-                        self.send_header(
-                            "Content-Type", "application/json; charset=utf-8"
-                        )
-                        self.send_header("Content-Length", str(len(response_body)))
-                        self.end_headers()
-                        self.wfile.write(response_body)
-                        return
-
-                    if status.get("is_available") is not True:
+                    if now_dt.hour != 9:
                         response_body = json.dumps(
                             {
                                 "ok": False,
                                 "reason": "not_in_checkin_window",
-                                "reward_dp": int(status.get("reward_dp", 1) or 1),
-                                "is_available": False,
-                                "already_checked_in": False,
                             },
                             ensure_ascii=False,
                         ).encode("utf-8")
@@ -2382,7 +2260,83 @@ class SaveDpHandler(BaseHTTPRequestHandler):
                         self.wfile.write(response_body)
                         return
 
-                    reward_dp = int(status.get("reward_dp", 1) or 1)
+                    history_lines = []
+                    if STATE_HISTORY_FILE.exists():
+                        try:
+                            history_lines = STATE_HISTORY_FILE.read_text(
+                                encoding="utf-8"
+                            ).splitlines()
+                        except Exception:
+                            history_lines = []
+
+                    undone_ts = set()
+                    for i in range(len(history_lines) - 1, -1, -1):
+                        raw = history_lines[i].strip()
+                        if raw == "":
+                            continue
+
+                        try:
+                            record = json.loads(raw)
+                        except Exception:
+                            continue
+
+                        if not isinstance(record, dict):
+                            continue
+                        if str(record.get("type", "")) != "undo":
+                            continue
+
+                        data = record.get("data")
+                        if not isinstance(data, dict):
+                            continue
+
+                        undo_of_ts = data.get("undo_of_ts")
+                        if isinstance(undo_of_ts, int):
+                            undone_ts.add(undo_of_ts)
+
+                    already_checked_in = False
+                    for i in range(len(history_lines) - 1, -1, -1):
+                        raw = history_lines[i].strip()
+                        if raw == "":
+                            continue
+
+                        try:
+                            record = json.loads(raw)
+                        except Exception:
+                            continue
+
+                        if not isinstance(record, dict):
+                            continue
+                        if str(record.get("type", "")) != "checkin":
+                            continue
+
+                        ts = record.get("ts")
+                        if not isinstance(ts, int):
+                            continue
+                        if ts in undone_ts:
+                            continue
+                        if ts < cycle_start_ts or ts >= cycle_end_ts:
+                            continue
+
+                        already_checked_in = True
+                        break
+
+                    if already_checked_in:
+                        response_body = json.dumps(
+                            {
+                                "ok": False,
+                                "reason": "already_checked_in",
+                            },
+                            ensure_ascii=False,
+                        ).encode("utf-8")
+                        self.send_response(200)
+                        self.send_header(
+                            "Content-Type", "application/json; charset=utf-8"
+                        )
+                        self.send_header("Content-Length", str(len(response_body)))
+                        self.end_headers()
+                        self.wfile.write(response_body)
+                        return
+
                     state = read_state_file()
                     new_dp = int(old_dp + reward_dp)
                     state["dp"] = int(new_dp)
@@ -2395,8 +2349,8 @@ class SaveDpHandler(BaseHTTPRequestHandler):
                         note="打卡获得 DP",
                         data={
                             "reward_dp": int(reward_dp),
-                            "cycle_start_ts": int(status.get("cycle_start_ts", 0) or 0),
-                            "cycle_end_ts": int(status.get("cycle_end_ts", 0) or 0),
+                            "cycle_start_ts": int(cycle_start_ts),
+                            "cycle_end_ts": int(cycle_end_ts),
                         },
                         changes=[{"path": "dp", "from": old_dp, "to": int(new_dp)}],
                         actor="user",

@@ -127,8 +127,8 @@ let pendingReloadWhenVisible = false;
 let pendingReloadRetryTimer = null;
 // 这个定时器用于定时刷新周视图里的“当前时间横条”。
 let agendaNowLineTimer = null;
-// 这个定时器用于定时刷新“打卡”按钮状态。
-let checkinStatusTimer = null;
+// 这个标记表示当前周期是否已经打过卡。
+let hasCheckedInCurrentCycle = false;
 // 这个数组保存周视图里的进程监控会话。
 let agendaProcessSessions = [];
 // 这个变量保存周视图色块的当前自定义颜色。
@@ -628,26 +628,24 @@ function render() {
 }
 
 // 这个函数把打卡状态显示到首页，并同步按钮是否可按。
-function renderCheckinStatus(data) {
+function renderCheckinStatus() {
   if (!checkinButtonElement || !checkinStatusElement) {
-    return;
-  }
-
-  if (!data || data.ok !== true) {
-    checkinButtonElement.disabled = true;
-    checkinStatusElement.textContent = "打卡状态读取失败";
     return;
   }
 
   checkinButtonElement.textContent = "打卡";
 
-  if (data.already_checked_in === true) {
+  // 时间窗口直接用本地时间判断，不需要每分钟请求后端。
+  const now = new Date();
+  const isCheckinWindowOpen = now.getHours() === 9;
+
+  if (hasCheckedInCurrentCycle === true) {
     checkinButtonElement.disabled = true;
     checkinStatusElement.textContent = "已打卡";
     return;
   }
 
-  if (data.is_available === true) {
+  if (isCheckinWindowOpen) {
     checkinButtonElement.disabled = false;
     checkinStatusElement.textContent = "";
     return;
@@ -655,6 +653,37 @@ function renderCheckinStatus(data) {
 
   checkinButtonElement.disabled = true;
   checkinStatusElement.textContent = "";
+}
+
+// 这个函数根据历史记录判断：当前周期是否已经打过卡。
+function updateCheckinStatusFromHistory(historyRecords) {
+  hasCheckedInCurrentCycle = false;
+
+  if (!Array.isArray(historyRecords) || historyRecords.length === 0) {
+    renderCheckinStatus();
+    return;
+  }
+
+  const cycleStartTs = getCurrentCycleStartTsSeconds();
+
+  for (let i = 0; i < historyRecords.length; i = i + 1) {
+    const item = historyRecords[i] || {};
+    const itemTs = Number(item.ts);
+    const itemType = String(item.type || "");
+
+    if (itemType !== "checkin") {
+      continue;
+    }
+
+    if (Number.isNaN(itemTs) || itemTs < cycleStartTs) {
+      continue;
+    }
+
+    hasCheckedInCurrentCycle = true;
+    break;
+  }
+
+  renderCheckinStatus();
 }
 
 // 这个函数负责把历史记录显示到页面上。
@@ -1408,35 +1437,19 @@ async function loadHistoryFromServer() {
     // 服务端返回的 items 是“最新在上”。
     renderHistory(items);
     renderCurrentCycleDpDelta(calculateCurrentCycleDpDeltaFromHistory(items));
+    updateCheckinStatusFromHistory(items);
   } catch (error) {
     // 读取失败就显示一行提示，不影响 DP/GP 使用。
     historyListElement.textContent = "（历史记录读取失败）";
     renderCurrentCycleDpDelta(0);
+    hasCheckedInCurrentCycle = false;
+    renderCheckinStatus();
   }
 }
 
-// 这个函数向后端读取当前周期的打卡状态。
-async function loadCheckinStatusFromServer() {
-  if (!checkinButtonElement || !checkinStatusElement) {
-    return;
-  }
-
-  try {
-    const response = await fetch("/api/checkin-status", {
-      cache: "no-store",
-    });
-
-    if (!response.ok) {
-      renderCheckinStatus({ ok: false });
-      return;
-    }
-
-    const data = await response.json();
-    renderCheckinStatus(data);
-  } catch (error) {
-    console.error("读取打卡状态失败", error);
-    renderCheckinStatus({ ok: false });
-  }
+// 这个函数只按本地时间重画打卡按钮，不向后端发请求。
+function refreshCheckinStatusByLocalTime() {
+  renderCheckinStatus();
 }
 
 // 这个函数从后端读取便签内容，并显示到右侧输入框。
@@ -1620,7 +1633,6 @@ function startStateEventStream() {
     loadStateFromFile();
     loadHistoryFromServer();
     loadDailyReportSimpleFromServer();
-    loadCheckinStatusFromServer();
   });
 
   // 收到名为 notify_tasks 的事件时，重新读取通知任务列表。
@@ -1706,22 +1718,19 @@ async function checkin() {
 
     const result = await response.json();
     if (!result || result.ok !== true) {
-      renderCheckinStatus({
-        ok: true,
-        reward_dp: result && result.reward_dp,
-        is_available: result && result.is_available,
-        already_checked_in: result && result.already_checked_in,
-      });
+      if (result && result.reason === "already_checked_in") {
+        hasCheckedInCurrentCycle = true;
+      }
+      renderCheckinStatus();
       return;
     }
 
     await loadStateFromFile();
     await loadHistoryFromServer();
     await loadDailyReportSimpleFromServer();
-    await loadCheckinStatusFromServer();
   } catch (error) {
     console.error("打卡失败", error);
-    await loadCheckinStatusFromServer();
+    renderCheckinStatus();
   }
 }
 
@@ -1733,14 +1742,13 @@ loadStateFromFile();
 loadHistoryFromServer();
 renderDailyReportSwitchButtons();
 loadDailyReportSimpleFromServer();
-loadCheckinStatusFromServer();
 loadNoteFromServer();
 startStateEventStream();
 setInfoBannerExpanded(false);
 renderInfoBanner();
 
-// 每分钟刷新一次打卡按钮状态，避免跨到 9 点后还停留在旧状态。
-checkinStatusTimer = window.setInterval(loadCheckinStatusFromServer, 60000);
+// 每分钟只按本地时间刷新一次按钮显示，不做网络轮询。
+window.setInterval(refreshCheckinStatusByLocalTime, 60000);
 
 // 这个函数把 DP 增加 1，并刷新页面。
 function addDp() {
@@ -2303,15 +2311,9 @@ loadNotifyTasksFromServer();
 window.setInterval(tickNotifyTasks, 1000);
 
 // 页面状态变化时，如果之前有“待刷新”，就在真正回到前台并拿到焦点后补一次整页刷新。
-// 没有待刷新时，只补拉通知任务，避免极端情况下错过 SSE 事件。
 document.addEventListener("visibilitychange", function () {
   if (pendingReloadWhenVisible) {
     flushPendingReloadIfReady();
-    return;
-  }
-
-  if (isSafeToReloadNow()) {
-    loadNotifyTasksFromServer();
   }
 });
 
