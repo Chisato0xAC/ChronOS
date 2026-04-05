@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from chronos_config import (
+    CHECKIN_REWARD_DP,
     DAY_BOUNDARY_HOUR,
     DAY_BOUNDARY_MINUTE,
     DAY_BOUNDARY_SECOND,
@@ -66,6 +67,9 @@ DISCONNECT_ERRORS = (BrokenPipeError, ConnectionResetError, ConnectionAbortedErr
 SERVICE_STATUS_LOG_INTERVAL_SECONDS = 60
 LAST_SERVICE_STATUS_LOG_TS = 0
 LAST_SERVICE_STATUS_LOG_LOCK = threading.Lock()
+
+# 日志输出锁：避免多个线程同时 print 时把内容挤到同一行。
+LOG_OUTPUT_LOCK = threading.Lock()
 
 # 爬虫运行状态文件（爬虫脚本读写）。
 CRAWLER_STATE_FILE = DATA_DIR / "crawler_state.json"
@@ -212,13 +216,15 @@ def log(message: str) -> None:
     # 统一日志输出（INFO + SERVER）。
     # 这样普通日志、错误日志、HTTP 日志都能对齐成同一种结构。
     now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{now_text}] [INFO] [SERVER] {message}", flush=True)
+    with LOG_OUTPUT_LOCK:
+        print(f"[{now_text}] [INFO] [SERVER] {message}", flush=True)
 
 
 def log_error(message: str) -> None:
     # 错误日志：和普通日志同结构，只是级别改为 ERROR。
     now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{now_text}] [ERROR] [SERVER] {message}", file=sys.stderr, flush=True)
+    with LOG_OUTPUT_LOCK:
+        print(f"[{now_text}] [ERROR] [SERVER] {message}", file=sys.stderr, flush=True)
 
 
 def strip_line_timestamp_prefix(text: str) -> str:
@@ -239,9 +245,11 @@ def log_external(source: str, message: str, level: str = "INFO") -> None:
     lvl = str(level or "INFO").upper().strip()
     src = str(source or "EXTERNAL").upper().strip()
     if lvl == "ERROR":
-        print(f"[{now_text}] [ERROR] [{src}] {body}", file=sys.stderr, flush=True)
+        with LOG_OUTPUT_LOCK:
+            print(f"[{now_text}] [ERROR] [{src}] {body}", file=sys.stderr, flush=True)
         return
-    print(f"[{now_text}] [INFO] [{src}] {body}", flush=True)
+    with LOG_OUTPUT_LOCK:
+        print(f"[{now_text}] [INFO] [{src}] {body}", flush=True)
 
 
 def forward_child_stream_lines(stream, source_name: str, level: str) -> None:
@@ -1256,6 +1264,88 @@ def get_day_window_by_boundary_ts(now_ts: int) -> tuple[int, int]:
     return int(day_start_dt.timestamp()), int(day_end_dt.timestamp())
 
 
+def build_checkin_status(now_ts: int | None = None) -> dict:
+    # 返回当前周期的打卡状态。
+    # 规则：
+    # 1. 每个周期只能打卡一次
+    # 2. 只有本地时间 9:00-9:59 可用
+    safe_now_ts = int(time.time()) if now_ts is None else int(now_ts)
+    now_dt = datetime.fromtimestamp(safe_now_ts)
+    cycle_start_ts, cycle_end_ts = get_day_window_by_boundary_ts(safe_now_ts)
+    reward_dp = int(CHECKIN_REWARD_DP)
+    already_checked_in = False
+    undone_ts = set()
+
+    if STATE_HISTORY_FILE.exists():
+        try:
+            lines = STATE_HISTORY_FILE.read_text(encoding="utf-8").splitlines()
+        except Exception:
+            lines = []
+
+        for i in range(len(lines) - 1, -1, -1):
+            raw = lines[i].strip()
+            if raw == "":
+                continue
+
+            try:
+                record = json.loads(raw)
+            except Exception:
+                continue
+
+            if not isinstance(record, dict):
+                continue
+
+            if str(record.get("type", "")) != "undo":
+                continue
+
+            data = record.get("data")
+            if not isinstance(data, dict):
+                continue
+
+            undo_of_ts = data.get("undo_of_ts")
+            if isinstance(undo_of_ts, int):
+                undone_ts.add(undo_of_ts)
+
+        for i in range(len(lines) - 1, -1, -1):
+            raw = lines[i].strip()
+            if raw == "":
+                continue
+
+            try:
+                record = json.loads(raw)
+            except Exception:
+                continue
+
+            if not isinstance(record, dict):
+                continue
+
+            record_type = str(record.get("type", ""))
+            if record_type != "checkin":
+                continue
+
+            ts = record.get("ts")
+            if not isinstance(ts, int):
+                continue
+            if ts in undone_ts:
+                continue
+            if ts < cycle_start_ts or ts >= cycle_end_ts:
+                continue
+
+            already_checked_in = True
+            break
+
+    is_available = now_dt.hour == 9 and already_checked_in is False
+
+    return {
+        "ok": True,
+        "reward_dp": int(reward_dp),
+        "is_available": bool(is_available),
+        "already_checked_in": bool(already_checked_in),
+        "cycle_start_ts": int(cycle_start_ts),
+        "cycle_end_ts": int(cycle_end_ts),
+    }
+
+
 def build_daily_report_simple(day_offset: int = 0) -> dict:
     # 生成“每日日报（简略）”：
     # - 支持按 day_offset 查看任意一天（0=当前日，-1=前一天）
@@ -1861,7 +1951,8 @@ class SaveDpHandler(BaseHTTPRequestHandler):
 
         now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         client = self.address_string()
-        print(f"[{now_text}] [INFO] [HTTP] {client} {detail}", flush=True)
+        with LOG_OUTPUT_LOCK:
+            print(f"[{now_text}] [INFO] [HTTP] {client} {detail}", flush=True)
 
     # 这里处理浏览器的 GET 请求，用来返回页面和脚本文件。
     def do_GET(self):
@@ -1998,6 +2089,26 @@ class SaveDpHandler(BaseHTTPRequestHandler):
                 return
             except Exception as e:
                 log_error(f"读取今日日报失败: {e}")
+                self.send_response(500)
+                self.end_headers()
+                return
+
+        # /api/checkin-status：返回首页打卡按钮当前是否可用。
+        if request_path == "/api/checkin-status":
+            try:
+                with STATE_IO_LOCK:
+                    payload = build_checkin_status()
+
+                response_body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", str(len(response_body)))
+                self.end_headers()
+                self.wfile.write(response_body)
+                return
+            except Exception as e:
+                log_error(f"读取打卡状态失败: {e}")
                 self.send_response(500)
                 self.end_headers()
                 return
@@ -2204,11 +2315,13 @@ class SaveDpHandler(BaseHTTPRequestHandler):
     # 这里处理前端发来的 POST 请求。
     def do_POST(self):
         # /api/save-dp：保存 DP
+        # /api/checkin：执行首页打卡
         # /api/undo：撤销最近一次修改（可追溯）
         # /api/trigger-event：接收外部事件（为自定义扩展规则预留）
         # /api/calc-cycle-run-cost：计算“周期内多次运行”的 DP 消耗（纯计算，不写文件）
         if self.path not in (
             "/api/save-dp",
+            "/api/checkin",
             "/api/undo",
             "/api/trigger-event",
             "/api/calc-cycle-run-cost",
@@ -2221,6 +2334,90 @@ class SaveDpHandler(BaseHTTPRequestHandler):
             self.send_response(404)
             self.end_headers()
             return
+
+        # /api/checkin：按规则执行一次打卡。
+        if self.path == "/api/checkin":
+            try:
+                with STATE_IO_LOCK:
+                    status = build_checkin_status()
+                    old_dp = int(read_state_file().get("dp", 0))
+
+                    if status.get("already_checked_in") is True:
+                        response_body = json.dumps(
+                            {
+                                "ok": False,
+                                "reason": "already_checked_in",
+                                "reward_dp": int(status.get("reward_dp", 1) or 1),
+                                "is_available": False,
+                                "already_checked_in": True,
+                            },
+                            ensure_ascii=False,
+                        ).encode("utf-8")
+                        self.send_response(200)
+                        self.send_header(
+                            "Content-Type", "application/json; charset=utf-8"
+                        )
+                        self.send_header("Content-Length", str(len(response_body)))
+                        self.end_headers()
+                        self.wfile.write(response_body)
+                        return
+
+                    if status.get("is_available") is not True:
+                        response_body = json.dumps(
+                            {
+                                "ok": False,
+                                "reason": "not_in_checkin_window",
+                                "reward_dp": int(status.get("reward_dp", 1) or 1),
+                                "is_available": False,
+                                "already_checked_in": False,
+                            },
+                            ensure_ascii=False,
+                        ).encode("utf-8")
+                        self.send_response(200)
+                        self.send_header(
+                            "Content-Type", "application/json; charset=utf-8"
+                        )
+                        self.send_header("Content-Length", str(len(response_body)))
+                        self.end_headers()
+                        self.wfile.write(response_body)
+                        return
+
+                    reward_dp = int(status.get("reward_dp", 1) or 1)
+                    state = read_state_file()
+                    new_dp = int(old_dp + reward_dp)
+                    state["dp"] = int(new_dp)
+                    if "gp" not in state:
+                        state["gp"] = 0
+
+                    write_json_atomic(STATE_FILE, state)
+                    append_state_history_with_data(
+                        event_type="checkin",
+                        note="打卡获得 DP",
+                        data={
+                            "reward_dp": int(reward_dp),
+                            "cycle_start_ts": int(status.get("cycle_start_ts", 0) or 0),
+                            "cycle_end_ts": int(status.get("cycle_end_ts", 0) or 0),
+                        },
+                        changes=[{"path": "dp", "from": old_dp, "to": int(new_dp)}],
+                        actor="user",
+                    )
+                    sse_broadcast("state", {"reason": "checkin"})
+
+                response_body = json.dumps(
+                    {"ok": True, "reward_dp": int(reward_dp), "dp": int(new_dp)},
+                    ensure_ascii=False,
+                ).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(response_body)))
+                self.end_headers()
+                self.wfile.write(response_body)
+                return
+            except Exception as e:
+                log_error(f"打卡失败: {e}")
+                self.send_response(500)
+                self.end_headers()
+                return
 
         # /api/save-note：保存右侧便签内容。
         if self.path == "/api/save-note":

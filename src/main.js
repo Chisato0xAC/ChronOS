@@ -17,6 +17,10 @@ const minusDpButtonElement = document.getElementById("minusDpButton");
 const dpInputElement = document.getElementById("dpInput");
 // 这行代码拿到设置 DP 按钮。
 const setDpButtonElement = document.getElementById("setDpButton");
+// 这行代码拿到首页“打卡”按钮。
+const checkinButtonElement = document.getElementById("checkinButton");
+// 这行代码拿到“打卡状态”提示文字。
+const checkinStatusElement = document.getElementById("checkinStatus");
 
 // 这行代码拿到撤销按钮。
 const undoButtonElement = document.getElementById("undoButton");
@@ -91,6 +95,14 @@ const notifySchedulePreviewElement = document.getElementById("notifySchedulePrev
 const notifyTaskListElement = document.getElementById("notifyTaskList");
 // 这行代码拿到“开发中提示条”。
 const cuteDevToastElement = document.getElementById("cuteDevToast");
+// 这行代码拿到顶部悬浮信息横幅。
+const infoBannerElement = document.getElementById("infoBanner");
+// 这行代码拿到横幅的点击按钮。
+const infoBannerButtonElement = document.getElementById("infoBannerButton");
+// 这行代码拿到横幅的一行摘要文本。
+const infoBannerSummaryElement = document.getElementById("infoBannerSummary");
+// 这行代码拿到横幅展开后的信息列表。
+const infoBannerListElement = document.getElementById("infoBannerList");
 // 单页布局下，历史区固定显示最近几条，避免出现翻页。
 const HISTORY_FETCH_LIMIT = 16;
 // 记录 SSE 是否已经成功连接过一次（用于判断“重连”）。
@@ -115,12 +127,93 @@ let pendingReloadWhenVisible = false;
 let pendingReloadRetryTimer = null;
 // 这个定时器用于定时刷新周视图里的“当前时间横条”。
 let agendaNowLineTimer = null;
+// 这个定时器用于定时刷新“打卡”按钮状态。
+let checkinStatusTimer = null;
 // 这个数组保存周视图里的进程监控会话。
 let agendaProcessSessions = [];
 // 这个变量保存周视图色块的当前自定义颜色。
 let agendaBlockColor = "#dbeafe";
+// 这个标记表示顶部信息横幅现在是否处于展开状态。
+let isInfoBannerExpanded = false;
 // 同一天里，相同进程如果前后间隔不超过这个秒数，就合并成一个块。
 const AGENDA_SESSION_MERGE_GAP_SECONDS = 8 * 60;
+
+// 这个函数把一组字符串渲染成横幅里的列表。
+function renderInfoBannerLines(lines) {
+  if (!infoBannerListElement) {
+    return;
+  }
+
+  infoBannerListElement.innerHTML = "";
+
+  for (let i = 0; i < lines.length; i = i + 1) {
+    const line = String(lines[i] || "").trim();
+    if (line === "") {
+      continue;
+    }
+
+    const itemElement = document.createElement("li");
+    itemElement.textContent = line;
+    infoBannerListElement.appendChild(itemElement);
+  }
+
+  if (infoBannerListElement.children.length === 0) {
+    const itemElement = document.createElement("li");
+    itemElement.textContent = "暂无信息";
+    infoBannerListElement.appendChild(itemElement);
+  }
+}
+
+// 这个函数负责刷新横幅里显示的摘要和信息列表。
+function renderInfoBanner() {
+  if (!infoBannerSummaryElement) {
+    return;
+  }
+
+  const serviceText = serviceStatusElement
+    ? String(serviceStatusElement.textContent || "正在读取服务状态...").trim()
+    : "正在读取服务状态...";
+  const dpText = currentDpElement ? String(currentDpElement.textContent || "0").trim() : "0";
+  const gpText = currentGpElement ? String(currentGpElement.textContent || "0.00").trim() : "0.00";
+  const cycleText = currentCycleDpDeltaElement
+    ? String(currentCycleDpDeltaElement.textContent || "(0)").trim()
+    : "(0)";
+  const notifyCount = Array.isArray(notifyPendingTasks) ? notifyPendingTasks.length : 0;
+  const dailyLines = dailyReportSimpleElement
+    ? String(dailyReportSimpleElement.textContent || "").split("\n")
+    : [];
+  const dailyHeadline = dailyLines.length > 0 ? String(dailyLines[0] || "").trim() : "";
+  const dailySubline = dailyLines.length > 1 ? String(dailyLines[1] || "").trim() : "";
+
+  infoBannerSummaryElement.textContent =
+    "状态 " + serviceText + " | DP " + dpText + " " + cycleText + " | 待通知 " + String(notifyCount);
+
+  const lines = [];
+  lines.push("服务状态：" + serviceText);
+  lines.push("当前 DP：" + dpText + " " + cycleText);
+  lines.push("当前 GP：" + gpText);
+  lines.push("待触发通知：" + String(notifyCount) + " 条");
+  if (dailyHeadline !== "") {
+    lines.push(dailyHeadline);
+  }
+  if (dailySubline !== "") {
+    lines.push(dailySubline);
+  }
+
+  renderInfoBannerLines(lines);
+}
+
+// 这个函数统一控制横幅展开或收起。
+function setInfoBannerExpanded(expanded) {
+  if (!infoBannerElement || !infoBannerButtonElement || !infoBannerListElement) {
+    return;
+  }
+
+  isInfoBannerExpanded = expanded === true;
+  infoBannerElement.classList.toggle("info-banner-open", isInfoBannerExpanded);
+  infoBannerButtonElement.setAttribute("aria-expanded", isInfoBannerExpanded ? "true" : "false");
+  infoBannerListElement.hidden = !isInfoBannerExpanded;
+}
 
 // 这个函数把颜色值收紧成 #RRGGBB，避免输入异常值。
 function sanitizeHexColor(colorValue) {
@@ -402,7 +495,11 @@ function syncMainRootOffset() {
 
   if (navBarCardElement.classList.contains("nav-right")) {
     mainRootElement.style.marginRight = String(barWidth + safeGap) + "px";
+    renderInfoBanner();
+    return;
   }
+
+  renderInfoBanner();
 }
 
 // 这个函数根据当前偏移更新“每日日报”的左右按钮状态。
@@ -527,6 +624,37 @@ function render() {
   currentDpElement.textContent = currentDp;
   // 这行把 GP 保留两位小数后再显示。
   currentGpElement.textContent = currentGp.toFixed(2);
+  renderInfoBanner();
+}
+
+// 这个函数把打卡状态显示到首页，并同步按钮是否可按。
+function renderCheckinStatus(data) {
+  if (!checkinButtonElement || !checkinStatusElement) {
+    return;
+  }
+
+  if (!data || data.ok !== true) {
+    checkinButtonElement.disabled = true;
+    checkinStatusElement.textContent = "打卡状态读取失败";
+    return;
+  }
+
+  checkinButtonElement.textContent = "打卡";
+
+  if (data.already_checked_in === true) {
+    checkinButtonElement.disabled = true;
+    checkinStatusElement.textContent = "已打卡";
+    return;
+  }
+
+  if (data.is_available === true) {
+    checkinButtonElement.disabled = false;
+    checkinStatusElement.textContent = "";
+    return;
+  }
+
+  checkinButtonElement.disabled = true;
+  checkinStatusElement.textContent = "";
 }
 
 // 这个函数负责把历史记录显示到页面上。
@@ -656,6 +784,7 @@ function renderDailyReportSimple(data) {
 
   if (!data || data.ok !== true) {
     dailyReportSimpleElement.textContent = "（日报读取失败）";
+    renderInfoBanner();
     return;
   }
 
@@ -691,6 +820,7 @@ function renderDailyReportSimple(data) {
   }
 
   dailyReportSimpleElement.textContent = lines.join("\n");
+  renderInfoBanner();
 }
 
 // 这个函数把统计数据渲染到“统计弹窗”。
@@ -787,6 +917,7 @@ async function loadDailyReportSimpleFromServer() {
       dailyReportSimpleElement.textContent = "（日报读取失败）";
       latestDailyReportData = null;
       renderStatsPanel(null);
+      renderInfoBanner();
       return;
     }
 
@@ -797,6 +928,7 @@ async function loadDailyReportSimpleFromServer() {
     dailyReportSimpleElement.textContent = "（日报读取失败）";
     latestDailyReportData = null;
     renderStatsPanel(null);
+    renderInfoBanner();
   }
 }
 
@@ -1283,6 +1415,30 @@ async function loadHistoryFromServer() {
   }
 }
 
+// 这个函数向后端读取当前周期的打卡状态。
+async function loadCheckinStatusFromServer() {
+  if (!checkinButtonElement || !checkinStatusElement) {
+    return;
+  }
+
+  try {
+    const response = await fetch("/api/checkin-status", {
+      cache: "no-store",
+    });
+
+    if (!response.ok) {
+      renderCheckinStatus({ ok: false });
+      return;
+    }
+
+    const data = await response.json();
+    renderCheckinStatus(data);
+  } catch (error) {
+    console.error("读取打卡状态失败", error);
+    renderCheckinStatus({ ok: false });
+  }
+}
+
 // 这个函数从后端读取便签内容，并显示到右侧输入框。
 async function loadNoteFromServer() {
   // 如果页面上没有便签框，就直接结束。
@@ -1443,6 +1599,7 @@ function startStateEventStream() {
   // 只有页面真的处于当前前台焦点时，才立刻整页刷新；否则等用户切回并聚焦后再刷新。
   source.onopen = function () {
     serviceStatusElement.textContent = "🟢 Connected";
+    renderInfoBanner();
 
     if (!hasOpenedStateStreamOnce) {
       hasOpenedStateStreamOnce = true;
@@ -1463,6 +1620,7 @@ function startStateEventStream() {
     loadStateFromFile();
     loadHistoryFromServer();
     loadDailyReportSimpleFromServer();
+    loadCheckinStatusFromServer();
   });
 
   // 收到名为 notify_tasks 的事件时，重新读取通知任务列表。
@@ -1474,6 +1632,7 @@ function startStateEventStream() {
   // 这里留一个提示，方便排查。
   source.onerror = function () {
     serviceStatusElement.textContent = "🔴 Disconnected";
+    renderInfoBanner();
     console.log("SSE 连接异常，浏览器将自动重连");
   };
 }
@@ -1532,6 +1691,40 @@ async function undoLastChange() {
   }
 }
 
+// 这个函数向后端发起打卡，由后端判断时间和是否重复领取。
+async function checkin() {
+  if (!checkinButtonElement) {
+    return;
+  }
+
+  checkinButtonElement.disabled = true;
+
+  try {
+    const response = await fetch("/api/checkin", {
+      method: "POST",
+    });
+
+    const result = await response.json();
+    if (!result || result.ok !== true) {
+      renderCheckinStatus({
+        ok: true,
+        reward_dp: result && result.reward_dp,
+        is_available: result && result.is_available,
+        already_checked_in: result && result.already_checked_in,
+      });
+      return;
+    }
+
+    await loadStateFromFile();
+    await loadHistoryFromServer();
+    await loadDailyReportSimpleFromServer();
+    await loadCheckinStatusFromServer();
+  } catch (error) {
+    console.error("打卡失败", error);
+    await loadCheckinStatusFromServer();
+  }
+}
+
 // 这行执行读取 JSON 并更新页面的流程。
 renderAgendaWeekView();
 loadAgendaProcessSessionsFromServer();
@@ -1540,8 +1733,14 @@ loadStateFromFile();
 loadHistoryFromServer();
 renderDailyReportSwitchButtons();
 loadDailyReportSimpleFromServer();
+loadCheckinStatusFromServer();
 loadNoteFromServer();
 startStateEventStream();
+setInfoBannerExpanded(false);
+renderInfoBanner();
+
+// 每分钟刷新一次打卡按钮状态，避免跨到 9 点后还停留在旧状态。
+checkinStatusTimer = window.setInterval(loadCheckinStatusFromServer, 60000);
 
 // 这个函数把 DP 增加 1，并刷新页面。
 function addDp() {
@@ -1606,6 +1805,10 @@ addDpButtonElement.addEventListener("click", addDp);
 minusDpButtonElement.addEventListener("click", minusDp);
 // 点击设置 DP 按钮时，执行输入框设置逻辑。
 setDpButtonElement.addEventListener("click", setDpFromInput);
+// 点击打卡按钮时，执行打卡。
+if (checkinButtonElement) {
+  checkinButtonElement.addEventListener("click", checkin);
+}
 
 // 在 DP 输入框按下 Enter 时，也执行“应用表达式”。
 dpInputElement.addEventListener("keydown", function (event) {
@@ -1697,6 +1900,13 @@ if (taskbarStoreButtonElement) {
   });
 }
 
+// 点击顶部横幅时，展开或收起信息列表。
+if (infoBannerButtonElement) {
+  infoBannerButtonElement.addEventListener("click", function () {
+    setInfoBannerExpanded(!isInfoBannerExpanded);
+  });
+}
+
 // 点击“工具”按钮时，打开工具弹窗。
 if (taskbarToolsButtonElement) {
   taskbarToolsButtonElement.addEventListener("click", openToolsPanel);
@@ -1748,6 +1958,13 @@ window.addEventListener("resize", renderAgendaProcessSessions);
 // 点击任务栏和弹窗外部区域时，自动关闭任务栏弹窗。
 document.addEventListener("click", function (event) {
   const target = event.target;
+
+  // 点在顶部信息横幅内部时，不自动收起它。
+  if (isInsideElement(infoBannerElement, target)) {
+    return;
+  }
+
+  setInfoBannerExpanded(false);
 
   // 点在任务栏按钮区时，不执行外部关闭。
   if (isInsideElement(navBarCardElement, target)) {
@@ -1905,6 +2122,7 @@ function renderNotifyTaskList() {
 
   if (!Array.isArray(notifyPendingTasks) || notifyPendingTasks.length === 0) {
     notifyTaskListElement.textContent = "（暂无）";
+    renderInfoBanner();
     return;
   }
 
@@ -1927,6 +2145,7 @@ function renderNotifyTaskList() {
   }
 
   notifyTaskListElement.textContent = lines.join("\n");
+  renderInfoBanner();
 }
 
 // 这个函数从后端读取通知任务，并只保留 pending 状态。
