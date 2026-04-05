@@ -181,6 +181,7 @@
     }
 
     #infoBanner {
+      --info-banner-idle-opacity: 0.05;
       position: fixed;
       z-index: 980;
       top: 8px;
@@ -192,10 +193,15 @@
       background: rgba(255, 253, 247, 0.2);
       color: #4b5563;
       box-shadow: 0 1px 6px rgba(0, 0, 0, 0.06);
-      opacity: 0.05;
+      opacity: var(--info-banner-idle-opacity);
       transition: opacity 0.18s ease, background 0.18s ease, box-shadow 0.18s ease;
       overflow: hidden;
       user-select: none;
+    }
+
+    #infoBanner.info-banner-unread {
+      opacity: 0.1;
+      background: rgba(255, 248, 248, 0.55);
     }
 
     #infoBanner:hover,
@@ -216,10 +222,18 @@
       cursor: pointer;
     }
 
-    #infoBannerTitle {
-      font-size: 12px;
-      color: #6b7280;
+    #infoBannerDot {
+      display: inline-block;
+      width: 8px;
+      height: 8px;
       margin-right: 8px;
+      border-radius: 999px;
+      background: #d14343;
+      vertical-align: middle;
+    }
+
+    #infoBannerDot[hidden] {
+      display: none;
     }
 
     #infoBannerSummary {
@@ -271,6 +285,40 @@
 
     #settingsPanel h3 {
       margin: 0 0 8px 0;
+    }
+
+    .settings-row {
+      margin-top: 8px;
+    }
+
+    .settings-row label {
+      display: block;
+      margin-bottom: 4px;
+    }
+
+    .settings-row select,
+    .settings-row input[type="range"] {
+      width: 100%;
+      margin-top: 0;
+      box-sizing: border-box;
+    }
+
+    .settings-row input[type="color"] {
+      margin-top: 0;
+    }
+
+    .settings-inline {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    #infoBannerIdleOpacityValue {
+      margin: 0;
+      min-width: 36px;
+      text-align: right;
+      color: #6b7280;
+      font-size: 12px;
     }
 
     #settingsPanel button {
@@ -623,11 +671,11 @@
 
   <aside id="infoBanner" aria-label="顶部信息横幅">
     <button id="infoBannerButton" type="button" aria-expanded="false" aria-controls="infoBannerList">
-      <span id="infoBannerTitle">ChronOS</span>
-      <span id="infoBannerSummary">正在读取信息...</span>
+      <span id="infoBannerDot" hidden></span>
+      <span id="infoBannerSummary">通知栏准备中...</span>
     </button>
     <ul id="infoBannerList" hidden>
-      <li>正在读取信息...</li>
+      <li>暂时没有新的 DP 变更</li>
     </ul>
   </aside>
 
@@ -652,15 +700,26 @@
 
       <section id="settingsPanel" aria-label="设置弹窗" hidden>
         <h3>设置</h3>
-        <label for="navPositionSelect">任务栏位置：</label>
-        <select id="navPositionSelect">
-          <option value="top">上</option>
-          <option value="bottom" selected>下</option>
-          <option value="left">左</option>
-          <option value="right">右</option>
-        </select>
-        <label for="agendaBlockColorInput">周视图色块颜色：</label>
-        <input id="agendaBlockColorInput" type="color" value="#dbeafe" />
+        <div class="settings-row">
+          <label for="navPositionSelect">任务栏位置：</label>
+          <select id="navPositionSelect">
+            <option value="top">上</option>
+            <option value="bottom" selected>下</option>
+            <option value="left">左</option>
+            <option value="right">右</option>
+          </select>
+        </div>
+        <div class="settings-row">
+          <label for="agendaBlockColorInput">周视图色块颜色：</label>
+          <input id="agendaBlockColorInput" type="color" value="#dbeafe" />
+        </div>
+        <div class="settings-row">
+          <label for="infoBannerIdleOpacityInput">通知栏静默透明度：</label>
+          <div class="settings-inline">
+            <input id="infoBannerIdleOpacityInput" type="range" min="0.02" max="0.2" step="0.01" value="0.05" />
+            <p id="infoBannerIdleOpacityValue">0.05</p>
+          </div>
+        </div>
         <div>
           <button id="closeSettingsPanelButton" type="button">关闭</button>
         </div>

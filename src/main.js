@@ -47,6 +47,10 @@ const openFloatingWindowButtonElement = document.getElementById("openFloatingWin
 const navPositionSelectElement = document.getElementById("navPositionSelect");
 // 这行代码拿到“周视图色块颜色”选择器。
 const agendaBlockColorInputElement = document.getElementById("agendaBlockColorInput");
+// 这行代码拿到“通知栏静默透明度”滑块。
+const infoBannerIdleOpacityInputElement = document.getElementById("infoBannerIdleOpacityInput");
+// 这行代码拿到“通知栏静默透明度”显示文字。
+const infoBannerIdleOpacityValueElement = document.getElementById("infoBannerIdleOpacityValue");
 // 这行代码拿到“导航栏卡片”本体。
 const navBarCardElement = document.getElementById("navBarCard");
 // 这行代码拿到“设置”按钮。
@@ -101,6 +105,8 @@ const infoBannerElement = document.getElementById("infoBanner");
 const infoBannerButtonElement = document.getElementById("infoBannerButton");
 // 这行代码拿到横幅的一行摘要文本。
 const infoBannerSummaryElement = document.getElementById("infoBannerSummary");
+// 这行代码拿到横幅里的未读红点。
+const infoBannerDotElement = document.getElementById("infoBannerDot");
 // 这行代码拿到横幅展开后的信息列表。
 const infoBannerListElement = document.getElementById("infoBannerList");
 // 单页布局下，历史区固定显示最近几条，避免出现翻页。
@@ -133,10 +139,135 @@ let hasCheckedInCurrentCycle = false;
 let agendaProcessSessions = [];
 // 这个变量保存周视图色块的当前自定义颜色。
 let agendaBlockColor = "#dbeafe";
+// 这个变量保存通知栏静默时的透明度。
+let infoBannerIdleOpacity = 0.05;
 // 这个标记表示顶部信息横幅现在是否处于展开状态。
 let isInfoBannerExpanded = false;
+// 这个数组保存“还没读过”的 DP 变更通知。
+let pendingDpNotifications = [];
+// 这个数组保存通知栏最近显示过的 DP 变更内容。
+let recentDpNotifications = [];
+// 这个对象保存已经放进通知栏的历史记录，避免重复加入。
+let seenDpNotificationMap = {};
+// 这个标记表示通知栏是否已经完成过第一次历史记录初始化。
+let hasInitializedDpNotifications = false;
 // 同一天里，相同进程如果前后间隔不超过这个秒数，就合并成一个块。
 const AGENDA_SESSION_MERGE_GAP_SECONDS = 8 * 60;
+
+// 这个函数把时间文本裁成 HH:MM:SS，方便通知栏显示。
+function formatBannerTimeText(textValue) {
+  const text = String(textValue || "").trim();
+  if (text.length >= 19) {
+    return text.slice(11, 19);
+  }
+  return text;
+}
+
+// 这个函数从一条历史记录里提取 DP 变化信息。
+function getDpChangeFromHistoryItem(item) {
+  if (!item || !Array.isArray(item.changes)) {
+    return null;
+  }
+
+  for (let i = 0; i < item.changes.length; i = i + 1) {
+    const change = item.changes[i] || {};
+    if (String(change.path || "") !== "dp") {
+      continue;
+    }
+
+    const fromValue = Number(change.from);
+    const toValue = Number(change.to);
+    if (Number.isNaN(fromValue) || Number.isNaN(toValue)) {
+      return null;
+    }
+
+    return {
+      fromValue: Math.floor(fromValue),
+      toValue: Math.floor(toValue),
+      deltaValue: Math.floor(toValue - fromValue),
+    };
+  }
+
+  return null;
+}
+
+// 这个函数把新的 DP 历史记录放进顶部通知栏。
+function collectDpNotificationsFromHistory(historyRecords) {
+  if (!Array.isArray(historyRecords) || historyRecords.length === 0) {
+    if (!hasInitializedDpNotifications) {
+      hasInitializedDpNotifications = true;
+    }
+    renderInfoBanner();
+    return;
+  }
+
+  // 第一次进入页面时，只建立“已见过”的基线，不把旧记录当成新通知。
+  if (!hasInitializedDpNotifications) {
+    for (let i = 0; i < historyRecords.length; i = i + 1) {
+      const item = historyRecords[i] || {};
+      const itemTs = Number(item.ts || 0);
+      const itemText = String(item.text || "").trim();
+      const itemType = String(item.type || "").trim();
+      const itemNote = String(item.note || "").trim();
+      const dedupeKey = String(itemTs) + "|" + itemType + "|" + itemText + "|" + itemNote;
+      seenDpNotificationMap[dedupeKey] = true;
+    }
+
+    hasInitializedDpNotifications = true;
+    renderInfoBanner();
+    return;
+  }
+
+  for (let i = historyRecords.length - 1; i >= 0; i = i - 1) {
+    const item = historyRecords[i] || {};
+    const itemTs = Number(item.ts || 0);
+    const itemText = String(item.text || "").trim();
+    const itemType = String(item.type || "").trim();
+    const itemNote = String(item.note || "").trim();
+    const dedupeKey = String(itemTs) + "|" + itemType + "|" + itemText + "|" + itemNote;
+
+    if (seenDpNotificationMap[dedupeKey] === true) {
+      continue;
+    }
+
+    const dpChange = getDpChangeFromHistoryItem(item);
+    if (!dpChange || dpChange.deltaValue === 0) {
+      seenDpNotificationMap[dedupeKey] = true;
+      continue;
+    }
+
+    let titleText = "DP 变更";
+    if (dpChange.deltaValue > 0) {
+      titleText = "DP 增加 " + String(dpChange.deltaValue);
+    } else {
+      titleText = "DP 减少 " + String(Math.abs(dpChange.deltaValue));
+    }
+
+    let detailText = "从 " + String(dpChange.fromValue) + " 变成 " + String(dpChange.toValue);
+    if (itemNote !== "") {
+      detailText = detailText + "，原因：" + itemNote;
+    }
+
+    pendingDpNotifications.unshift({
+      key: dedupeKey,
+      text: formatBannerTimeText(itemText) + " " + titleText + "，" + detailText,
+    });
+    recentDpNotifications.unshift({
+      key: dedupeKey,
+      text: formatBannerTimeText(itemText) + " " + titleText + "，" + detailText,
+    });
+    seenDpNotificationMap[dedupeKey] = true;
+  }
+
+  if (pendingDpNotifications.length > 12) {
+    pendingDpNotifications = pendingDpNotifications.slice(0, 12);
+  }
+  if (recentDpNotifications.length > 12) {
+    recentDpNotifications = recentDpNotifications.slice(0, 12);
+  }
+
+  renderInfoBanner();
+}
 
 // 这个函数把一组字符串渲染成横幅里的列表。
 function renderInfoBannerLines(lines) {
@@ -170,36 +301,46 @@ function renderInfoBanner() {
     return;
   }
 
-  const serviceText = serviceStatusElement
-    ? String(serviceStatusElement.textContent || "正在读取服务状态...").trim()
-    : "正在读取服务状态...";
-  const dpText = currentDpElement ? String(currentDpElement.textContent || "0").trim() : "0";
-  const gpText = currentGpElement ? String(currentGpElement.textContent || "0.00").trim() : "0.00";
-  const cycleText = currentCycleDpDeltaElement
-    ? String(currentCycleDpDeltaElement.textContent || "(0)").trim()
-    : "(0)";
-  const notifyCount = Array.isArray(notifyPendingTasks) ? notifyPendingTasks.length : 0;
-  const dailyLines = dailyReportSimpleElement
-    ? String(dailyReportSimpleElement.textContent || "").split("\n")
-    : [];
-  const dailyHeadline = dailyLines.length > 0 ? String(dailyLines[0] || "").trim() : "";
-  const dailySubline = dailyLines.length > 1 ? String(dailyLines[1] || "").trim() : "";
+  const unreadCount = pendingDpNotifications.length;
+  const displayCount = recentDpNotifications.length;
+  if (unreadCount <= 0) {
+    if (infoBannerElement) {
+      infoBannerElement.classList.remove("info-banner-unread");
+    }
+    if (displayCount > 0) {
+      infoBannerSummaryElement.textContent = "已阅读最近的 DP 变更";
+    } else {
+      infoBannerSummaryElement.textContent = "暂时没有新的 DP 变更";
+    }
+    if (infoBannerDotElement) {
+      infoBannerDotElement.hidden = true;
+    }
+    if (displayCount > 0) {
+      const lines = [];
+      for (let i = 0; i < recentDpNotifications.length; i = i + 1) {
+        const item = recentDpNotifications[i] || {};
+        lines.push(String(item.text || ""));
+      }
+      renderInfoBannerLines(lines);
+    } else {
+      renderInfoBannerLines(["暂时没有新的 DP 变更"]);
+    }
+    return;
+  }
 
-  infoBannerSummaryElement.textContent =
-    "状态 " + serviceText + " | DP " + dpText + " " + cycleText + " | 待通知 " + String(notifyCount);
+  infoBannerSummaryElement.textContent = "有 " + String(unreadCount) + " 条新的 DP 变更";
+  if (infoBannerElement) {
+    infoBannerElement.classList.add("info-banner-unread");
+  }
+  if (infoBannerDotElement) {
+    infoBannerDotElement.hidden = false;
+  }
 
   const lines = [];
-  lines.push("服务状态：" + serviceText);
-  lines.push("当前 DP：" + dpText + " " + cycleText);
-  lines.push("当前 GP：" + gpText);
-  lines.push("待触发通知：" + String(notifyCount) + " 条");
-  if (dailyHeadline !== "") {
-    lines.push(dailyHeadline);
+  for (let i = 0; i < recentDpNotifications.length; i = i + 1) {
+    const item = recentDpNotifications[i] || {};
+    lines.push(String(item.text || ""));
   }
-  if (dailySubline !== "") {
-    lines.push(dailySubline);
-  }
-
   renderInfoBannerLines(lines);
 }
 
@@ -213,6 +354,12 @@ function setInfoBannerExpanded(expanded) {
   infoBannerElement.classList.toggle("info-banner-open", isInfoBannerExpanded);
   infoBannerButtonElement.setAttribute("aria-expanded", isInfoBannerExpanded ? "true" : "false");
   infoBannerListElement.hidden = !isInfoBannerExpanded;
+
+  // 点开通知栏后，视为已经阅读，立刻清掉未读红点。
+  if (isInfoBannerExpanded && pendingDpNotifications.length > 0) {
+    pendingDpNotifications = [];
+    renderInfoBanner();
+  }
 }
 
 // 这个函数把颜色值收紧成 #RRGGBB，避免输入异常值。
@@ -222,6 +369,38 @@ function sanitizeHexColor(colorValue) {
     return safeColor;
   }
   return "#dbeafe";
+}
+
+// 这个函数把通知栏静默透明度限制在允许范围内。
+function sanitizeInfoBannerIdleOpacity(value) {
+  let safeValue = Number(value);
+  if (Number.isNaN(safeValue) || !Number.isFinite(safeValue)) {
+    safeValue = 0.05;
+  }
+  if (safeValue < 0.02) {
+    safeValue = 0.02;
+  }
+  if (safeValue > 0.2) {
+    safeValue = 0.2;
+  }
+  return Math.round(safeValue * 100) / 100;
+}
+
+// 这个函数把静默透明度同步到设置输入框和页面样式。
+function applyInfoBannerIdleOpacity(opacityValue) {
+  infoBannerIdleOpacity = sanitizeInfoBannerIdleOpacity(opacityValue);
+
+  if (infoBannerElement) {
+    infoBannerElement.style.setProperty("--info-banner-idle-opacity", String(infoBannerIdleOpacity));
+  }
+
+  if (infoBannerIdleOpacityInputElement) {
+    infoBannerIdleOpacityInputElement.value = infoBannerIdleOpacity.toFixed(2);
+  }
+
+  if (infoBannerIdleOpacityValueElement) {
+    infoBannerIdleOpacityValueElement.textContent = infoBannerIdleOpacity.toFixed(2);
+  }
 }
 
 // 这个函数把当前色块颜色同步到设置输入框。
@@ -1023,15 +1202,17 @@ async function loadUiSettingsFromServer() {
 
     agendaBlockColor = sanitizeHexColor(result.agenda_block_color);
     syncAgendaBlockColorInput();
+    applyInfoBannerIdleOpacity(result.info_banner_idle_opacity);
     renderAgendaProcessSessions();
   } catch (error) {
     // 读取失败时保留默认颜色，不打断其他功能。
   }
 }
 
-// 这个函数把新的色块颜色保存到后端文件。
-async function saveAgendaBlockColorToServer(colorValue) {
-  const safeColor = sanitizeHexColor(colorValue);
+// 这个函数把界面设置保存到后端文件。
+async function saveUiSettingsToServer() {
+  const safeColor = sanitizeHexColor(agendaBlockColor);
+  const safeOpacity = sanitizeInfoBannerIdleOpacity(infoBannerIdleOpacity);
 
   try {
     const response = await fetch("/api/save-ui-settings", {
@@ -1041,6 +1222,7 @@ async function saveAgendaBlockColorToServer(colorValue) {
       },
       body: JSON.stringify({
         agenda_block_color: safeColor,
+        info_banner_idle_opacity: safeOpacity,
       }),
     });
     const result = await response.json();
@@ -1049,6 +1231,7 @@ async function saveAgendaBlockColorToServer(colorValue) {
     }
 
     agendaBlockColor = sanitizeHexColor(result.agenda_block_color);
+    applyInfoBannerIdleOpacity(result.info_banner_idle_opacity);
     syncAgendaBlockColorInput();
     renderAgendaProcessSessions();
   } catch (error) {
@@ -1435,6 +1618,7 @@ async function loadHistoryFromServer() {
     const result = await response.json();
     const items = Array.isArray(result.items) ? result.items : [];
     // 服务端返回的 items 是“最新在上”。
+    collectDpNotificationsFromHistory(items);
     renderHistory(items);
     renderCurrentCycleDpDelta(calculateCurrentCycleDpDeltaFromHistory(items));
     updateCheckinStatusFromHistory(items);
@@ -1870,7 +2054,18 @@ if (agendaBlockColorInputElement) {
     renderAgendaProcessSessions();
   });
   agendaBlockColorInputElement.addEventListener("change", function () {
-    saveAgendaBlockColorToServer(agendaBlockColorInputElement.value);
+    saveUiSettingsToServer();
+  });
+}
+
+// 调整通知栏静默透明度时，立即预览并保存。
+if (infoBannerIdleOpacityInputElement) {
+  applyInfoBannerIdleOpacity(infoBannerIdleOpacityInputElement.value);
+  infoBannerIdleOpacityInputElement.addEventListener("input", function () {
+    applyInfoBannerIdleOpacity(infoBannerIdleOpacityInputElement.value);
+  });
+  infoBannerIdleOpacityInputElement.addEventListener("change", function () {
+    saveUiSettingsToServer();
   });
 }
 

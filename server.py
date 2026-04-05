@@ -514,6 +514,7 @@ def ensure_ui_settings_file_exists() -> None:
 
     default_data = {
         "agenda_block_color": "#dbeafe",
+        "info_banner_idle_opacity": 0.05,
         "updated_ts": 0,
     }
     UI_SETTINGS_FILE.write_text(
@@ -924,10 +925,16 @@ def read_ui_settings_file() -> dict:
     try:
         data = json.loads(UI_SETTINGS_FILE.read_text(encoding="utf-8"))
         if isinstance(data, dict):
+            idle_opacity = float(data.get("info_banner_idle_opacity", 0.05) or 0.05)
+            if idle_opacity < 0.02:
+                idle_opacity = 0.02
+            if idle_opacity > 0.2:
+                idle_opacity = 0.2
             return {
                 "agenda_block_color": sanitize_hex_color(
                     data.get("agenda_block_color", "#dbeafe")
                 ),
+                "info_banner_idle_opacity": idle_opacity,
                 "updated_ts": int(data.get("updated_ts", 0) or 0),
             }
     except Exception:
@@ -935,6 +942,7 @@ def read_ui_settings_file() -> dict:
 
     return {
         "agenda_block_color": "#dbeafe",
+        "info_banner_idle_opacity": 0.05,
         "updated_ts": 0,
     }
 
@@ -2070,6 +2078,9 @@ class SaveDpHandler(BaseHTTPRequestHandler):
                         "agenda_block_color": str(
                             ui_settings.get("agenda_block_color", "#dbeafe")
                         ),
+                        "info_banner_idle_opacity": float(
+                            ui_settings.get("info_banner_idle_opacity", 0.05) or 0.05
+                        ),
                         "updated_ts": int(ui_settings.get("updated_ts", 0) or 0),
                     },
                     ensure_ascii=False,
@@ -2439,6 +2450,13 @@ class SaveDpHandler(BaseHTTPRequestHandler):
             block_color = sanitize_hex_color(
                 body_data.get("agenda_block_color", "#dbeafe")
             )
+            idle_opacity = float(
+                body_data.get("info_banner_idle_opacity", 0.05) or 0.05
+            )
+            if idle_opacity < 0.02:
+                idle_opacity = 0.02
+            if idle_opacity > 0.2:
+                idle_opacity = 0.2
             now_ts = int(time.time())
 
             try:
@@ -2447,6 +2465,7 @@ class SaveDpHandler(BaseHTTPRequestHandler):
                         UI_SETTINGS_FILE,
                         {
                             "agenda_block_color": block_color,
+                            "info_banner_idle_opacity": idle_opacity,
                             "updated_ts": now_ts,
                         },
                     )
@@ -2455,6 +2474,7 @@ class SaveDpHandler(BaseHTTPRequestHandler):
                     {
                         "ok": True,
                         "agenda_block_color": block_color,
+                        "info_banner_idle_opacity": idle_opacity,
                         "updated_ts": now_ts,
                     },
                     ensure_ascii=False,
